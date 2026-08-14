@@ -58,7 +58,27 @@ Combina tre misure indipendenti calcolate sulla barra chiusa (shift 1):
   trading e log degli errori tramite `GetLastError()` con descrizione testuale.
 - Fallback automatico sull'errore 130 (stop non validi): apertura senza stop seguita da `OrderModify`.
 - Segnali valutati solo alla chiusura di barra (`TradeOnNewBarOnly`), filtro spread (`MaxSpreadPips`).
-- Pannello informativo sul grafico con regime corrente, ATR, SL/TP dinamici, rischio ed esposizione.
+
+### 6. Dashboard grafica
+Pannello ad oggetti (`OBJ_RECTANGLE_LABEL` + `OBJ_LABEL`) ancorato all'angolo superiore sinistro del
+grafico, sfondo nero, aggiornato una volta al secondo. Cinque sezioni:
+
+- **CONTO**: numero conto e broker, server, leva, saldo, equity, margine usato e libero, livello di
+  margine, drawdown corrente rispetto al picco di equity.
+- **PERFORMANCE EA**: P/L flottante, profitto della giornata, profitto realizzato, **profitto totale**
+  (realizzato + flottante), numero di trade chiusi e vincenti, win rate, profit factor. Tutte le
+  statistiche sono filtrate per Magic Number e simbolo, e includono swap e commissioni.
+- **MERCATO**: regime rilevato, strategia attiva, ADX, ATR in pips, spread, countdown alla chiusura
+  della barra.
+- **RISCHIO / PROSSIMO TRADE**: rischio in percentuale e in valuta, lotto stimato per il prossimo
+  ingresso, SL e TP dinamici in pips, rapporto rischio/rendimento.
+- **POSIZIONI E STATO**: posizioni aperte su massimo consentito, stato di trailing e break-even,
+  AutoTrading, connessione, stato del mercato, ora del server.
+
+Colori, font, posizione e larghezza sono configurabili (`PanelX`, `PanelY`, `PanelWidth`,
+`PanelFont`, `PanelFontSize`, palette completa). Gli oggetti usano un prefisso derivato dal Magic
+Number, quindi piu' istanze dell'EA sullo stesso grafico non interferiscono; alla rimozione dell'EA
+vengono cancellati automaticamente.
 
 ## Parametri principali
 
@@ -72,6 +92,7 @@ Combina tre misure indipendenti calcolate sulla barra chiusa (shift 1):
 | `EnableBreakEven` / `BreakEvenPips` | true / 15.0 | break-even |
 | `MaxOpenPositions` | 1 | limite di esposizione |
 | `TwoStepStops` | false | attivare su broker ECN che rifiutano gli stop in apertura |
+| `ShowPanel` / `PanelX` / `PanelWidth` | true / 10 / 290 | dashboard grafica |
 
 ## Note operative
 

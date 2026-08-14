@@ -114,6 +114,27 @@ input bool            TradeOnNewBarOnly    = true;   // Valuta i segnali solo a 
 input bool            VerboseLog           = true;   // Log dettagliato nel journal
 
 //+------------------------------------------------------------------+
+//| INPUT: Dashboard grafica                                         |
+//+------------------------------------------------------------------+
+input string          s_panel              = "===== DASHBOARD =====";
+input bool            ShowPanel            = true;   // Mostra la dashboard sul grafico
+input int             PanelX               = 10;     // Distanza dal bordo sinistro (px)
+input int             PanelY               = 20;     // Distanza dal bordo superiore (px)
+input int             PanelWidth           = 290;    // Larghezza del pannello (px)
+input string          PanelFont            = "Tahoma"; // Font del pannello
+input int             PanelFontSize        = 8;      // Dimensione del font
+input color           PanelBgColor         = clrBlack;        // Sfondo del pannello
+input color           PanelBorderColor     = C'55,55,55';     // Bordo del pannello
+input color           PanelSectionBgColor  = C'22,22,22';     // Sfondo delle intestazioni di sezione
+input color           PanelTitleColor      = clrWhite;        // Colore del titolo
+input color           PanelSectionColor    = clrDeepSkyBlue;  // Colore dei titoli di sezione
+input color           PanelCaptionColor    = C'150,150,150';  // Colore delle etichette
+input color           PanelValueColor      = clrWhiteSmoke;   // Colore dei valori
+input color           PanelPositiveColor   = C'0,220,120';    // Colore dei valori positivi
+input color           PanelNegativeColor   = C'255,80,80';    // Colore dei valori negativi
+input color           PanelNeutralColor    = clrGoldenrod;    // Colore dei valori neutri/attenzione
+
+//+------------------------------------------------------------------+
 //| Variabili globali                                                |
 //+------------------------------------------------------------------+
 double   g_pip            = 0.0;   // Valore di 1 pip in prezzo (gestisce broker 4/5 cifre)
@@ -127,6 +148,20 @@ datetime g_lastBarTime    = 0;     // Timestamp dell'ultima barra elaborata
 datetime g_lastTradeTime  = 0;     // Timestamp di apertura dell'ultimo trade
 int      g_timeframe      = 0;     // Timeframe effettivo dei segnali
 bool     g_initOk         = false; // Stato di inizializzazione
+
+//--- Dashboard: identificativi e geometria
+string   g_panelPrefix    = "";    // Prefisso univoco degli oggetti grafici
+int      g_rowHeight      = 16;    // Altezza di una riga del pannello
+int      g_panelPad       = 8;     // Padding interno del pannello
+
+//--- Dashboard: statistiche di conto e di performance (cache)
+double   g_peakEquity     = 0.0;   // Massimo di equity registrato (per il drawdown)
+double   g_statNetProfit  = 0.0;   // Profitto netto realizzato dall'EA
+double   g_statGrossWin   = 0.0;   // Somma dei trade vincenti
+double   g_statGrossLoss  = 0.0;   // Somma (positiva) dei trade perdenti
+double   g_statTodayProfit= 0.0;   // Profitto realizzato nella giornata corrente
+int      g_statTrades     = 0;     // Numero di trade chiusi
+int      g_statWins       = 0;     // Numero di trade vincenti
 
 //+------------------------------------------------------------------+
 //| OnInit - Inizializzazione e validazione                          |
@@ -170,6 +205,16 @@ int OnInit()
       return(INIT_PARAMETERS_INCORRECT);
 
    g_lastBarTime = iTime(Symbol(), g_timeframe, 0);
+
+   //--- Dashboard: prefisso univoco per non interferire con altri EA sullo stesso grafico
+   g_panelPrefix = "ARE" + IntegerToString(MagicNumber) + "_";
+   g_rowHeight   = PanelFontSize + 8;
+   g_peakEquity  = AccountEquity();
+
+   Comment(""); // pulizia di eventuali testi residui
+   if(ShowPanel)
+      UpdatePanel();
+
    g_initOk      = true;
 
    Print("[", TradeComment, "] Init OK | Symbol=", Symbol(),
@@ -190,6 +235,7 @@ int OnInit()
 void OnDeinit(const int reason)
   {
    Print("[", TradeComment, "] Deinit, motivo=", reason, " (", DeinitReasonText(reason), ")");
+   DeletePanel();
    Comment("");
   }
 
@@ -204,22 +250,26 @@ void OnTick()
    //--- 1) La gestione delle posizioni aperte lavora su OGNI tick
    ManageOpenPositions();
 
-   //--- 2) Il pannello informativo si aggiorna sempre
-   if(!IsTesting() || IsVisualMode())
-      ShowDashboard();
+   //--- 2) Aggiornamento del massimo di equity (base del calcolo di drawdown)
+   if(AccountEquity() > g_peakEquity)
+      g_peakEquity = AccountEquity();
 
-   //--- 3) Controlli generali di operativita'
+   //--- 3) La dashboard si aggiorna sempre (esclusa la modalita' non visuale del tester)
+   if(ShowPanel && (!IsTesting() || IsVisualMode()))
+      UpdatePanel();
+
+   //--- 4) Controlli generali di operativita'
    if(!IsTradeAllowed())
       return;
 
    if(IsTradeContextBusy())
       return;
 
-   //--- 4) Dati storici sufficienti per tutti gli indicatori?
+   //--- 5) Dati storici sufficienti per tutti gli indicatori?
    if(!HasEnoughBars())
       return;
 
-   //--- 5) Valutazione dei segnali: solo alla chiusura di una barra
+   //--- 6) Valutazione dei segnali: solo alla chiusura di una barra
    datetime barTime = iTime(Symbol(), g_timeframe, 0);
    if(TradeOnNewBarOnly)
      {
@@ -228,19 +278,19 @@ void OnTick()
       g_lastBarTime = barTime;
      }
 
-   //--- 6) Limite di esposizione: massimo N posizioni contemporanee
+   //--- 7) Limite di esposizione: massimo N posizioni contemporanee
    if(CountOwnPositions() >= MaxOpenPositions)
       return;
 
-   //--- 7) Cooldown dopo l'ultimo trade
+   //--- 8) Cooldown dopo l'ultimo trade
    if(IsInCooldown())
       return;
 
-   //--- 8) Filtro sullo spread corrente
+   //--- 9) Filtro sullo spread corrente
    if(!IsSpreadAcceptable())
       return;
 
-   //--- 9) Regime di mercato e segnale coerente con esso
+   //--- 10) Regime di mercato e segnale coerente con esso
    ENUM_MARKET_REGIME regime = DetectMarketRegime();
    if(regime == REGIME_NONE)
       return;
@@ -256,7 +306,7 @@ void OnTick()
    if(signal == 0)
       return;
 
-   //--- 10) Esecuzione
+   //--- 11) Esecuzione
    if(signal > 0)
       OpenPosition(OP_BUY, regime);
    else
@@ -753,7 +803,7 @@ bool ClosePositionByTicket(int ticket)
 //| Rischio monetario / perdita per lotto alla distanza dello SL.    |
 //| Gestisce LOTSTEP, MINLOT, MAXLOT e il margine disponibile.       |
 //+------------------------------------------------------------------+
-double CalculateLotSize(double slDistancePrice)
+double CalculateLotSize(double slDistancePrice, bool logErrors = true)
   {
    //--- Modalita' a lotto fisso
    if(FixedLots > 0.0)
@@ -774,7 +824,8 @@ double CalculateLotSize(double slDistancePrice)
 
    if(tickValue <= 0.0)
      {
-      Print("[", TradeComment, "] TICKVALUE non disponibile per ", Symbol(), ": impossibile dimensionare il lotto.");
+      if(logErrors)
+         Print("[", TradeComment, "] TICKVALUE non disponibile per ", Symbol(), ": impossibile dimensionare il lotto.");
       return(0.0);
      }
 
@@ -792,7 +843,7 @@ double CalculateLotSize(double slDistancePrice)
       double affordable = (AccountFreeMargin() * 0.90) / marginPerLot;
       if(affordable < lots)
         {
-         if(VerboseLog)
+         if(VerboseLog && logErrors)
             Print("[", TradeComment, "] Volume ridotto da ", DoubleToString(lots, 4),
                   " a ", DoubleToString(affordable, 4), " per vincolo di margine libero.");
          lots = affordable;
@@ -812,7 +863,8 @@ double CalculateLotSize(double slDistancePrice)
    double realRisk = lots * lossPerLot;
    if(realRisk > riskMoney * 1.5)
      {
-      Print("[", TradeComment, "] Il lotto minimo (", DoubleToString(lots, g_lotDigits),
+      if(logErrors)
+         Print("[", TradeComment, "] Il lotto minimo (", DoubleToString(lots, g_lotDigits),
             ") comporta un rischio di ", DoubleToString(realRisk, 2), " ", AccountCurrency(),
             " superiore al budget di ", DoubleToString(riskMoney, 2), ". Operazione annullata.");
       return(0.0);
@@ -1204,33 +1256,348 @@ void LogSignal(string regime, string side, string reason)
   }
 
 //+------------------------------------------------------------------+
-//| Pannello informativo sul grafico                                 |
+//|                        DASHBOARD GRAFICA                         |
+//|  Pannello ad oggetti (OBJ_RECTANGLE_LABEL + OBJ_LABEL) ancorato  |
+//|  all'angolo superiore sinistro del grafico, sfondo nero.         |
 //+------------------------------------------------------------------+
-void ShowDashboard()
+
+//+------------------------------------------------------------------+
+//| Crea/aggiorna un rettangolo del pannello                         |
+//+------------------------------------------------------------------+
+void PanelRect(string name, int x, int y, int w, int h, color bg, color border, int zorder)
   {
-   static datetime lastUpdate = 0;
-   if(TimeCurrent() == lastUpdate)
-      return;
-   lastUpdate = TimeCurrent();
-
-   ENUM_MARKET_REGIME regime = HasEnoughBars() ? DetectMarketRegime() : REGIME_NONE;
-
-   double atr        = GetATR(1);
-   double adx        = iADX(Symbol(), g_timeframe, ADX_Period, PRICE_CLOSE, MODE_MAIN, 1);
-   double spreadPips = (Ask - Bid) / g_pip;
-
-   string txt = "=== Adaptive Regime EA ===\n";
-   txt += "Simbolo: " + Symbol() + "  TF: " + TimeframeToString(g_timeframe) + "  Digits: " + IntegerToString(Digits) + "\n";
-   txt += "Regime: " + RegimeToString(regime) + "   ADX: " + DoubleToString(adx, 1) + "\n";
-   txt += "ATR(" + IntegerToString(ATR_Period) + "): " + DoubleToString(atr / g_pip, 1) + " pips\n";
-   txt += "SL dinamico: " + DoubleToString(atr * ATR_Multiplier_SL / g_pip, 1) + " pips   ";
-   txt += "TP dinamico: " + DoubleToString(atr * ATR_Multiplier_TP / g_pip, 1) + " pips\n";
-   txt += "Spread: " + DoubleToString(spreadPips, 1) + " pips\n";
-   txt += "Rischio per trade: " + DoubleToString(RiskPercent, 2) + "%  (" + DoubleToString(RiskAmount(), 2) + " " + AccountCurrency() + ")\n";
-   txt += "Posizioni aperte: " + IntegerToString(CountOwnPositions()) + " / " + IntegerToString(MaxOpenPositions) + "\n";
-   txt += "Trailing: " + (EnableTrailingStop ? "ON" : "OFF") + "   Break-Even: " + (EnableBreakEven ? "ON" : "OFF") + "\n";
-   txt += "Equity: " + DoubleToString(AccountEquity(), 2) + "   Balance: " + DoubleToString(AccountBalance(), 2) + "\n";
-
-   Comment(txt);
+   if(ObjectFind(0, name) < 0)
+     {
+      if(!ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0))
+         return;
+     }
+   ObjectSetInteger(0, name, OBJPROP_CORNER,      CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE,   x);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE,   y);
+   ObjectSetInteger(0, name, OBJPROP_XSIZE,       w);
+   ObjectSetInteger(0, name, OBJPROP_YSIZE,       h);
+   ObjectSetInteger(0, name, OBJPROP_BGCOLOR,     bg);
+   ObjectSetInteger(0, name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, name, OBJPROP_COLOR,       border);
+   ObjectSetInteger(0, name, OBJPROP_STYLE,       STYLE_SOLID);
+   ObjectSetInteger(0, name, OBJPROP_WIDTH,       1);
+   ObjectSetInteger(0, name, OBJPROP_BACK,        false);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE,  false);
+   ObjectSetInteger(0, name, OBJPROP_SELECTED,    false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN,      true);
+   ObjectSetInteger(0, name, OBJPROP_ZORDER,      zorder);
   }
+
+//+------------------------------------------------------------------+
+//| Crea/aggiorna un'etichetta del pannello                          |
+//+------------------------------------------------------------------+
+void PanelText(string name, int x, int y, string text, color clr, int fontSize, int anchor)
+  {
+   if(ObjectFind(0, name) < 0)
+     {
+      if(!ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0))
+         return;
+     }
+   ObjectSetInteger(0, name, OBJPROP_CORNER,     CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE,  x);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE,  y);
+   ObjectSetInteger(0, name, OBJPROP_ANCHOR,     anchor);
+   ObjectSetInteger(0, name, OBJPROP_COLOR,      clr);
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE,   fontSize);
+   ObjectSetInteger(0, name, OBJPROP_BACK,       false);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_SELECTED,   false);
+   ObjectSetInteger(0, name, OBJPROP_HIDDEN,     true);
+   ObjectSetInteger(0, name, OBJPROP_ZORDER,     3);
+   ObjectSetString(0,  name, OBJPROP_FONT,       PanelFont);
+   ObjectSetString(0,  name, OBJPROP_TEXT,       text);
+  }
+
+//+------------------------------------------------------------------+
+//| Intestazione di sezione                                          |
+//+------------------------------------------------------------------+
+void PanelSection(int &y, string id, string title)
+  {
+   PanelRect(g_panelPrefix + "sec_" + id, PanelX + 1, y - 2, PanelWidth - 2, g_rowHeight + 2,
+             PanelSectionBgColor, PanelSectionBgColor, 1);
+   PanelText(g_panelPrefix + "sect_" + id, PanelX + g_panelPad, y + 1, title,
+             PanelSectionColor, PanelFontSize, ANCHOR_LEFT_UPPER);
+   y += g_rowHeight + 4;
+  }
+
+//+------------------------------------------------------------------+
+//| Riga del pannello: etichetta a sinistra, valore a destra         |
+//+------------------------------------------------------------------+
+void PanelRow(int &y, string id, string caption, string value, color valueColor)
+  {
+   PanelText(g_panelPrefix + "cap_" + id, PanelX + g_panelPad, y, caption,
+             PanelCaptionColor, PanelFontSize, ANCHOR_LEFT_UPPER);
+   PanelText(g_panelPrefix + "val_" + id, PanelX + PanelWidth - g_panelPad, y, value,
+             valueColor, PanelFontSize, ANCHOR_RIGHT_UPPER);
+   y += g_rowHeight;
+  }
+
+//+------------------------------------------------------------------+
+//| Rimozione di tutti gli oggetti della dashboard                   |
+//+------------------------------------------------------------------+
+void DeletePanel()
+  {
+   //--- Salvaguardia: senza prefisso il ciclo cancellerebbe tutti gli oggetti del grafico
+   if(StringLen(g_panelPrefix) == 0)
+      return;
+
+   for(int i = ObjectsTotal(0, 0, -1) - 1; i >= 0; i--)
+     {
+      string name = ObjectName(0, i, 0, -1);
+      if(StringFind(name, g_panelPrefix, 0) == 0)
+         ObjectDelete(0, name);
+     }
+   ChartRedraw();
+  }
+
+//+------------------------------------------------------------------+
+//| Statistiche sui trade chiusi dell'EA (con cache)                 |
+//+------------------------------------------------------------------+
+void UpdateTradeStats()
+  {
+   static datetime lastCalc    = 0;
+   static int      lastHistory = -1;
+
+   int history = OrdersHistoryTotal();
+
+   //--- Ricalcolo solo se lo storico cambia o ogni 10 secondi
+   if(history == lastHistory && TimeCurrent() - lastCalc < 10)
+      return;
+
+   lastHistory = history;
+   lastCalc    = TimeCurrent();
+
+   g_statNetProfit   = 0.0;
+   g_statGrossWin    = 0.0;
+   g_statGrossLoss   = 0.0;
+   g_statTodayProfit = 0.0;
+   g_statTrades      = 0;
+   g_statWins        = 0;
+
+   datetime dayStart = TimeCurrent() - (TimeCurrent() % 86400);
+
+   for(int i = 0; i < history; i++)
+     {
+      if(!OrderSelect(i, SELECT_BY_POS, MODE_HISTORY))
+         continue;
+      if(OrderMagicNumber() != MagicNumber || OrderSymbol() != Symbol())
+         continue;
+      if(OrderType() != OP_BUY && OrderType() != OP_SELL)
+         continue;
+
+      //--- Risultato netto: profitto lordo + swap + commissioni
+      double net = OrderProfit() + OrderSwap() + OrderCommission();
+
+      g_statNetProfit += net;
+      g_statTrades++;
+
+      if(net >= 0.0)
+        {
+         g_statWins++;
+         g_statGrossWin += net;
+        }
+      else
+         g_statGrossLoss += -net;
+
+      if(OrderCloseTime() >= dayStart)
+         g_statTodayProfit += net;
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Profitto flottante delle posizioni aperte dall'EA                |
+//+------------------------------------------------------------------+
+double FloatingProfit()
+  {
+   double total = 0.0;
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      if(!OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
+         continue;
+      if(OrderMagicNumber() != MagicNumber || OrderSymbol() != Symbol())
+         continue;
+      if(OrderType() != OP_BUY && OrderType() != OP_SELL)
+         continue;
+      total += OrderProfit() + OrderSwap() + OrderCommission();
+     }
+   return(total);
+  }
+
+//+------------------------------------------------------------------+
+//| Colore in funzione del segno di un valore                        |
+//+------------------------------------------------------------------+
+color SignColor(double value)
+  {
+   if(value > 0.0) return(PanelPositiveColor);
+   if(value < 0.0) return(PanelNegativeColor);
+   return(PanelValueColor);
+  }
+
+//+------------------------------------------------------------------+
+//| Importo formattato con segno e valuta del conto                  |
+//+------------------------------------------------------------------+
+string MoneyStr(double value)
+  {
+   string sign = (value > 0.0 ? "+" : "");
+   return(sign + DoubleToString(value, 2) + " " + AccountCurrency());
+  }
+
+//+------------------------------------------------------------------+
+//| Conto alla rovescia alla chiusura della barra corrente           |
+//+------------------------------------------------------------------+
+string BarCountdown()
+  {
+   int seconds = (int)(iTime(Symbol(), g_timeframe, 0) + g_timeframe * 60 - TimeCurrent());
+   if(seconds < 0)
+      seconds = 0;
+
+   int hh = seconds / 3600;
+   int mm = (seconds % 3600) / 60;
+   int ss = seconds % 60;
+
+   string txt = "";
+   if(hh > 0)
+      txt = StringFormat("%02d:%02d:%02d", hh, mm, ss);
+   else
+      txt = StringFormat("%02d:%02d", mm, ss);
+
+   return(txt);
+  }
+
+//+------------------------------------------------------------------+
+//| DASHBOARD: costruzione e aggiornamento del pannello              |
+//+------------------------------------------------------------------+
+void UpdatePanel()
+  {
+   //--- Aggiornamento al massimo una volta al secondo (evita flicker e carico inutile)
+   static datetime lastRefresh = 0;
+   if(TimeCurrent() == lastRefresh)
+      return;
+   lastRefresh = TimeCurrent();
+
+   UpdateTradeStats();
+
+   //--- Dati di mercato e di stato ------------------------------------
+   ENUM_MARKET_REGIME regime = REGIME_NONE;
+   double atr = 0.0, adx = 0.0;
+
+   if(HasEnoughBars())
+     {
+      regime = DetectMarketRegime();
+      atr    = GetATR(1);
+      adx    = iADX(Symbol(), g_timeframe, ADX_Period, PRICE_CLOSE, MODE_MAIN, 1);
+     }
+
+   double spreadPips = (Ask - Bid) / g_pip;
+   double slPips     = (atr > 0.0 ? atr * ATR_Multiplier_SL / g_pip : 0.0);
+   double tpPips     = (atr > 0.0 ? atr * ATR_Multiplier_TP / g_pip : 0.0);
+   double nextLots   = (atr > 0.0 ? CalculateLotSize(atr * ATR_Multiplier_SL, false) : 0.0);
+
+   double floating   = FloatingProfit();
+   double totalPL    = g_statNetProfit + floating;
+
+   double equity     = AccountEquity();
+   double balance    = AccountBalance();
+   double marginUsed = AccountMargin();
+   double marginFree = AccountFreeMargin();
+   double marginLvl  = (marginUsed > 0.0 ? equity / marginUsed * 100.0 : 0.0);
+   double drawdown   = (g_peakEquity > 0.0 ? (g_peakEquity - equity) / g_peakEquity * 100.0 : 0.0);
+   if(drawdown < 0.0)
+      drawdown = 0.0;
+
+   double winRate    = (g_statTrades > 0 ? (double)g_statWins / g_statTrades * 100.0 : 0.0);
+   double profitFact = (g_statGrossLoss > 0.0 ? g_statGrossWin / g_statGrossLoss : 0.0);
+
+   int openPositions = CountOwnPositions();
+
+   //--- Geometria: lo sfondo viene creato per primo, l'altezza a fine layout
+   int y = PanelY + g_panelPad + g_rowHeight + 6; // spazio per l'intestazione
+   PanelRect(g_panelPrefix + "bg", PanelX, PanelY, PanelWidth, 100,
+             PanelBgColor, PanelBorderColor, 0);
+
+   //--- Intestazione --------------------------------------------------
+   PanelRect(g_panelPrefix + "hdr", PanelX + 1, PanelY + 1, PanelWidth - 2, g_rowHeight + 6,
+             PanelSectionBgColor, PanelSectionBgColor, 1);
+   PanelText(g_panelPrefix + "title", PanelX + g_panelPad, PanelY + 5,
+             "ADAPTIVE REGIME EA", PanelTitleColor, PanelFontSize + 1, ANCHOR_LEFT_UPPER);
+   PanelText(g_panelPrefix + "titler", PanelX + PanelWidth - g_panelPad, PanelY + 5,
+             Symbol() + " " + TimeframeToString(g_timeframe), PanelSectionColor,
+             PanelFontSize, ANCHOR_RIGHT_UPPER);
+
+   //--- Sezione CONTO -------------------------------------------------
+   PanelSection(y, "acc", "CONTO");
+   PanelRow(y, "accnum", "Conto",           IntegerToString(AccountNumber()) + " (" + AccountCompany() + ")", PanelValueColor);
+   PanelRow(y, "accsrv", "Server / Leva",   AccountServer() + "  1:" + IntegerToString(AccountLeverage()),     PanelValueColor);
+   PanelRow(y, "accbal", "Saldo",           DoubleToString(balance, 2) + " " + AccountCurrency(),              PanelValueColor);
+   PanelRow(y, "accequ", "Equity",          DoubleToString(equity, 2) + " " + AccountCurrency(),
+            (equity >= balance ? PanelPositiveColor : PanelNegativeColor));
+   PanelRow(y, "accmgu", "Margine usato",   DoubleToString(marginUsed, 2) + " " + AccountCurrency(),           PanelValueColor);
+   PanelRow(y, "accmgf", "Margine libero",  DoubleToString(marginFree, 2) + " " + AccountCurrency(),           PanelValueColor);
+   PanelRow(y, "accmgl", "Livello margine", (marginUsed > 0.0 ? DoubleToString(marginLvl, 1) + " %" : "-"),
+            (marginUsed <= 0.0 ? PanelValueColor : (marginLvl < 200.0 ? PanelNegativeColor : PanelPositiveColor)));
+   PanelRow(y, "accdd",  "Drawdown attuale", DoubleToString(drawdown, 2) + " %",
+            (drawdown > 10.0 ? PanelNegativeColor : (drawdown > 5.0 ? PanelNeutralColor : PanelValueColor)));
+
+   //--- Sezione PERFORMANCE ------------------------------------------
+   PanelSection(y, "perf", "PERFORMANCE EA (magic " + IntegerToString(MagicNumber) + ")");
+   PanelRow(y, "pfltp", "P/L flottante",     MoneyStr(floating),           SignColor(floating));
+   PanelRow(y, "pfday", "Profitto oggi",     MoneyStr(g_statTodayProfit),  SignColor(g_statTodayProfit));
+   PanelRow(y, "pfcls", "Profitto chiuso",   MoneyStr(g_statNetProfit),    SignColor(g_statNetProfit));
+   PanelRow(y, "pftot", "PROFITTO TOTALE",   MoneyStr(totalPL),            SignColor(totalPL));
+   PanelRow(y, "pftrd", "Trade chiusi",      IntegerToString(g_statTrades) + "  (vinti " + IntegerToString(g_statWins) + ")", PanelValueColor);
+   PanelRow(y, "pfwin", "Win rate",          (g_statTrades > 0 ? DoubleToString(winRate, 1) + " %" : "-"),
+            (g_statTrades <= 0 ? PanelValueColor : (winRate >= 40.0 ? PanelPositiveColor : PanelNeutralColor)));
+   PanelRow(y, "pfpf",  "Profit factor",     (profitFact > 0.0 ? DoubleToString(profitFact, 2) : "-"),
+            (profitFact <= 0.0 ? PanelValueColor : (profitFact >= 1.0 ? PanelPositiveColor : PanelNegativeColor)));
+
+   //--- Sezione MERCATO ----------------------------------------------
+   PanelSection(y, "mkt", "MERCATO");
+   PanelRow(y, "mkreg", "Regime rilevato",  RegimeToString(regime),
+            (regime == REGIME_TREND ? PanelPositiveColor : (regime == REGIME_RANGE ? PanelSectionColor : PanelNeutralColor)));
+   PanelRow(y, "mkstr", "Strategia attiva", (regime == REGIME_TREND ? "Trend following" :
+                                            (regime == REGIME_RANGE ? "Mean reversion" : "In attesa")), PanelValueColor);
+   PanelRow(y, "mkadx", "ADX(" + IntegerToString(ADX_Period) + ")", DoubleToString(adx, 1),
+            (adx >= ADX_Threshold ? PanelPositiveColor : PanelValueColor));
+   PanelRow(y, "mkatr", "ATR(" + IntegerToString(ATR_Period) + ")", DoubleToString(atr / g_pip, 1) + " pips", PanelValueColor);
+   PanelRow(y, "mkspr", "Spread",           DoubleToString(spreadPips, 1) + " pips",
+            (MaxSpreadPips > 0.0 && spreadPips > MaxSpreadPips ? PanelNegativeColor : PanelValueColor));
+   PanelRow(y, "mkbar", "Prossima barra",   BarCountdown(), PanelValueColor);
+
+   //--- Sezione RISCHIO ----------------------------------------------
+   PanelSection(y, "rsk", "RISCHIO / PROSSIMO TRADE");
+   PanelRow(y, "rkpct", "Rischio per trade", DoubleToString(RiskPercent, 2) + " %  (" + DoubleToString(RiskAmount(), 2) + " " + AccountCurrency() + ")", PanelValueColor);
+   PanelRow(y, "rklot", "Lotto stimato",     (nextLots > 0.0 ? DoubleToString(nextLots, g_lotDigits) : "n/d"),
+            (nextLots > 0.0 ? PanelValueColor : PanelNeutralColor));
+   PanelRow(y, "rksl",  "Stop Loss dinamico", (slPips > 0.0 ? DoubleToString(slPips, 1) + " pips" : "-"), PanelValueColor);
+   PanelRow(y, "rktp",  "Take Profit dinamico", (tpPips > 0.0 ? DoubleToString(tpPips, 1) + " pips" : "-"), PanelValueColor);
+   PanelRow(y, "rkrr",  "Rapporto R:R",      "1 : " + DoubleToString(ATR_Multiplier_TP / ATR_Multiplier_SL, 2), PanelValueColor);
+
+   //--- Sezione POSIZIONI / STATO ------------------------------------
+   PanelSection(y, "pos", "POSIZIONI E STATO");
+   PanelRow(y, "psopn", "Posizioni aperte", IntegerToString(openPositions) + " / " + IntegerToString(MaxOpenPositions),
+            (openPositions > 0 ? PanelSectionColor : PanelValueColor));
+   PanelRow(y, "pstrl", "Trailing Stop",    (EnableTrailingStop ? "ON  (" + DoubleToString(TrailingStopPips, 0) + " pips)" : "OFF"),
+            (EnableTrailingStop ? PanelPositiveColor : PanelCaptionColor));
+   PanelRow(y, "psbe",  "Break-Even",       (EnableBreakEven ? "ON  (" + DoubleToString(BreakEvenPips, 0) + " pips)" : "OFF"),
+            (EnableBreakEven ? PanelPositiveColor : PanelCaptionColor));
+   PanelRow(y, "psaut", "AutoTrading",      (IsExpertEnabled() && IsTradeAllowed() ? "ATTIVO" : "DISATTIVO"),
+            (IsExpertEnabled() && IsTradeAllowed() ? PanelPositiveColor : PanelNegativeColor));
+   PanelRow(y, "pscon", "Connessione",      (IsConnected() ? "ONLINE" : "OFFLINE"),
+            (IsConnected() ? PanelPositiveColor : PanelNegativeColor));
+   PanelRow(y, "psmkt", "Mercato",          (MarketInfo(Symbol(), MODE_TRADEALLOWED) > 0.0 ? "APERTO" : "CHIUSO"),
+            (MarketInfo(Symbol(), MODE_TRADEALLOWED) > 0.0 ? PanelPositiveColor : PanelNegativeColor));
+   PanelRow(y, "pstim", "Ora server",       TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS), PanelValueColor);
+
+   //--- Altezza finale dello sfondo in funzione del contenuto
+   int panelHeight = y - PanelY + g_panelPad;
+   ObjectSetInteger(0, g_panelPrefix + "bg", OBJPROP_YSIZE, panelHeight);
+
+   ChartRedraw();
+  }
+
 //+------------------------------------------------------------------+
