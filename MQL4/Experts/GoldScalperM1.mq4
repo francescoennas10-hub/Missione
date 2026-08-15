@@ -1,7 +1,21 @@
 //+------------------------------------------------------------------+
 //|                                              GoldScalperM1.mq4    |
-//|            Expert Advisor di scalping per XAUUSD su M1 (MT4)      |
-//|                            v1.00                                  |
+//|         Expert Advisor di scalping per XAUUSD su M1 e M5 (MT4)    |
+//|                            v1.10                                  |
+//|                                                                   |
+//|  NOVITA' DELLA v1.10                                              |
+//|   - PROFILO DI AGGRESSIVITA' (da conservativo a molto aggressivo) |
+//|     che agisce insieme su filtri di setup, frequenza e rischio.   |
+//|   - ADATTAMENTO AUTOMATICO AL TIMEFRAME: le soglie in pips seguono |
+//|     la radice del tempo, i tempi seguono la durata della barra e   |
+//|     il timeframe direzionale sale se e' troppo vicino.            |
+//|   - FILTRO DI VOLATILITA' RELATIVO: si confronta l'ATR con la sua  |
+//|     media, non con un numero fisso di pips. Una soglia assoluta    |
+//|     presuppone di sapere quanto vale l'ATR "normale", che cambia   |
+//|     con il prezzo dell'oro e con il broker: lasciata fissa,        |
+//|     impedisce ogni ingresso per giorni interi.                    |
+//|   - Diagnostica all'avvio che segnala subito una soglia che sta    |
+//|     bloccando l'operativita'.                                     |
 //|                                                                   |
 //|  FILOSOFIA                                                        |
 //|   Lo scalping su oro in M1 non fallisce per mancanza di segnali:   |
@@ -60,13 +74,24 @@ enum ENUM_PANEL_CORNER
    PANEL_TOP_RIGHT = 1   // Angolo alto a destra
   };
 
+enum ENUM_AGGRESSION
+  {
+   AGGR_CUSTOM       = 0,  // Nessun profilo: usa i parametri come impostati
+   AGGR_CONSERVATIVE = 1,  // Conservativo: meno operazioni, filtri stretti
+   AGGR_STANDARD     = 2,  // Standard: parametri come impostati, sessioni piene
+   AGGR_AGGRESSIVE   = 3,  // Aggressivo: piu' operazioni, filtri larghi, rischio maggiore
+   AGGR_EXTREME      = 4   // Molto aggressivo: massima frequenza, drawdown elevato
+  };
+
 //+------------------------------------------------------------------+
-//| INPUT: Timeframe                                                 |
+//| INPUT: Timeframe e profilo operativo                             |
 //+------------------------------------------------------------------+
-input string          s_tf                 = "===== TIMEFRAME =====";
-input ENUM_TIMEFRAMES EntryTimeframe       = PERIOD_M1;   // Timeframe di ingresso (progettato per M1)
+input string          s_tf                 = "===== TIMEFRAME E PROFILO =====";
+input ENUM_TIMEFRAMES EntryTimeframe       = PERIOD_M1;   // Timeframe di ingresso (M1 o M5)
 input ENUM_TIMEFRAMES TrendTimeframe       = PERIOD_M15;  // Timeframe che detta la direzione
-input bool            TradeOnNewBarOnly    = true;        // Valuta i segnali solo alla chiusura della barra M1
+input bool            AutoAdaptToTimeframe = true;        // Riscala i parametri secondo il timeframe scelto
+input ENUM_AGGRESSION AggressionProfile    = AGGR_AGGRESSIVE; // Profilo di aggressivita'
+input bool            TradeOnNewBarOnly    = true;        // Valuta i segnali solo alla chiusura della barra
 
 //+------------------------------------------------------------------+
 //| INPUT: Rischio                                                   |
@@ -120,10 +145,20 @@ input bool            RequireBreakout      = true;   // Richiedi la rottura del 
 //+------------------------------------------------------------------+
 //| INPUT: Volatilita' e anti-spike                                  |
 //+------------------------------------------------------------------+
+//| Il filtro principale e' RELATIVO: confronta l'ATR corrente con la |
+//| sua media recente. Una soglia assoluta in pips presuppone di      |
+//| sapere quanto vale l'ATR "normale", che invece cambia con il      |
+//| livello del prezzo dell'oro, con il broker e con il periodo:      |
+//| lasciata fissa, blocca l'operativita' per giorni interi.          |
+//| Le soglie assolute restano disponibili come rete di sicurezza,    |
+//| ma sono disattivate (0) di default.                               |
 input string          s_vol                = "===== VOLATILITA' =====";
-input int             ATR_Period           = 14;     // Periodo ATR su M1
-input double          MinATRPips           = 2.0;    // ATR minimo in pips (sotto: mercato morto)
-input double          MaxATRPips           = 30.0;   // ATR massimo in pips (sopra: mercato da notizia)
+input int             ATR_Period           = 14;     // Periodo ATR sul timeframe di ingresso
+input int             ATR_AvgPeriod        = 100;    // Barre su cui misurare l'ATR abituale
+input double          MinATRRatio          = 0.55;   // ATR/media minimo (sotto: mercato morto)
+input double          MaxATRRatio          = 2.50;   // ATR/media massimo (sopra: volatilita' anomala)
+input double          MinATRPips           = 0.0;    // Limite assoluto minimo in pips (0 = disattivo)
+input double          MaxATRPips           = 0.0;    // Limite assoluto massimo in pips (0 = disattivo)
 input double          SpikeATRFactor       = 3.0;    // Range barra oltre N*ATR = spike, nessun ingresso
 
 //+------------------------------------------------------------------+
@@ -182,7 +217,7 @@ input bool            CloseAllOnFriday     = true;   // Chiudi le posizioni al F
 input string          s_exec               = "===== ESECUZIONE =====";
 input ENUM_PIP_MODE   PipMode              = PIP_AUTO; // Definizione del pip
 input double          CustomPipSize        = 0.10;   // Pip personalizzato (se PipMode = PIP_CUSTOM)
-input double          MaxSpreadPips        = 3.0;    // Spread massimo assoluto (0 = nessun filtro)
+input double          MaxSpreadPips        = 6.0;    // Spread massimo assoluto in pips (0 = nessun filtro)
 input double          MaxSpreadToATR       = 0.25;   // Spread massimo come frazione di ATR (0 = off)
 input double          SlippagePips         = 2.0;    // Slippage tollerato (pips)
 input int             MaxRetries           = 3;      // Tentativi di invio ordine
@@ -232,6 +267,42 @@ double   g_maxLot         = 100.0;
 //--- Timeframe risolti
 int      g_entryTF        = 0;
 int      g_trendTF        = 0;
+
+//--- PARAMETRI EFFETTIVI
+//    Gli input non sono modificabili in MQL4: il profilo di aggressivita' e
+//    l'adattamento al timeframe scrivono qui i valori realmente usati, e la
+//    dashboard mostra questi, non gli input. Cosi' cio' che si legge sul
+//    grafico e' sempre cio' che l'EA sta applicando davvero.
+double   g_adxMin         = 0.0;
+double   g_minBody        = 0.0;
+int      g_pullbackBars   = 0;
+double   g_rsiMaxEntry    = 0.0;
+bool     g_requireBreak   = true;
+bool     g_requireSlope   = true;
+int      g_maxTradesDay   = 0;
+int      g_maxTradesHour  = 0;
+int      g_cooldownBars   = 0;
+int      g_maxConsecLoss  = 0;
+double   g_minTPCost      = 0.0;
+double   g_minRR          = 0.0;
+double   g_maxSpreadATR   = 0.0;
+double   g_riskPercent    = 0.0;
+double   g_minATRRatio    = 0.0;
+double   g_maxATRRatio    = 0.0;
+double   g_spikeFactor    = 0.0;
+double   g_minATRPips     = 0.0;
+double   g_maxATRPips     = 0.0;
+double   g_minSLPips      = 0.0;
+double   g_maxSpreadPips  = 0.0;
+double   g_beLockPips     = 0.0;
+double   g_trailStepPips  = 0.0;
+int      g_maxTradeMin    = 0;
+int      g_s1Start        = 0;      // Finestre di sessione in minuti dalla mezzanotte
+int      g_s1End          = 0;
+int      g_s2Start        = 0;
+int      g_s2End          = 0;
+string   g_profileName    = "";
+string   g_adaptNote      = "";
 
 //--- Stato operativo
 datetime g_lastBarTime    = 0;
@@ -291,6 +362,10 @@ int OnInit()
 
    DetectSymbolProfile();
 
+   //--- Profilo di aggressivita' e adattamento al timeframe: da qui in poi
+   //    l'EA lavora sui valori effettivi, non sugli input grezzi.
+   ApplyProfileAndTimeframe();
+
    g_lotStep = MarketInfo(Symbol(), MODE_LOTSTEP);
    g_minLot  = MarketInfo(Symbol(), MODE_MINLOT);
    g_maxLot  = MarketInfo(Symbol(), MODE_MAXLOT);
@@ -337,10 +412,61 @@ int OnInit()
          " | Magic=", MagicNumber);
 
    if(CommissionPerLot <= 0.0)
-      Print("[", TradeComment, "] NOTA: CommissionPerLot = 0. Su M1 la commissione incide sul risultato ",
-            "piu' della strategia: impostala con il valore reale round-turn del tuo conto.");
+      Print("[", TradeComment, "] NOTA: CommissionPerLot = 0. Su timeframe rapidi la commissione incide ",
+            "sul risultato piu' della strategia: impostala con il valore reale round-turn del tuo conto.");
+
+   LogVolatilityDiagnostic();
 
    return(INIT_SUCCEEDED);
+  }
+
+//+------------------------------------------------------------------+
+//| DIAGNOSTICA DELLA VOLATILITA' ALL'AVVIO                          |
+//| Misura subito i valori reali del simbolo e avvisa se una soglia  |
+//| impostata a mano sta per bloccare ogni ingresso: un EA che non   |
+//| apre mai deve dirlo all'avvio, non lasciarlo dedurre dal journal.|
+//+------------------------------------------------------------------+
+void LogVolatilityDiagnostic()
+  {
+   double atr = iATR(Symbol(), g_entryTF, ATR_Period, 1);
+   double avg = GetAverageATR(g_entryTF, ATR_AvgPeriod, 1);
+
+   if(atr <= 0.0 || avg <= 0.0)
+     {
+      Print("[", TradeComment, "] Diagnostica volatilita' rinviata: storico ",
+            TimeframeToString(g_entryTF), " ancora insufficiente. ",
+            "Scorri il grafico indietro per far scaricare le barre.");
+      return;
+     }
+
+   double atrPips = atr / g_pip;
+   double avgPips = avg / g_pip;
+   double ratio   = atr / avg;
+   double spread  = MathMax(Ask - Bid, 0.0) / g_pip;
+
+   Print("[", TradeComment, "] Diagnostica volatilita': ATR ", DoubleToString(atrPips, 1),
+         " pips, media a ", ATR_AvgPeriod, " barre ", DoubleToString(avgPips, 1),
+         " pips, rapporto ", DoubleToString(ratio, 2), "x",
+         " | banda ammessa ", DoubleToString(g_minATRRatio, 2), "-", DoubleToString(g_maxATRRatio, 2), "x",
+         " | spread ", DoubleToString(spread, 1), " pips");
+
+   //--- Le soglie assolute sono la causa piu' comune di un EA che non apre mai
+   if(g_maxATRPips > 0.0 && atrPips > g_maxATRPips)
+      Print("[", TradeComment, "] ATTENZIONE: MaxATRPips = ", DoubleToString(g_maxATRPips, 1),
+            " ma l'ATR corrente e' ", DoubleToString(atrPips, 1),
+            " pips. Con questa impostazione NON verra' aperta alcuna posizione. ",
+            "Portalo a 0 per lasciare decidere il filtro relativo.");
+
+   if(g_minATRPips > 0.0 && atrPips < g_minATRPips)
+      Print("[", TradeComment, "] ATTENZIONE: MinATRPips = ", DoubleToString(g_minATRPips, 1),
+            " ma l'ATR corrente e' ", DoubleToString(atrPips, 1),
+            " pips. Con questa impostazione NON verra' aperta alcuna posizione.");
+
+   if(g_maxSpreadPips > 0.0 && spread > g_maxSpreadPips)
+      Print("[", TradeComment, "] ATTENZIONE: spread corrente ", DoubleToString(spread, 1),
+            " pips oltre il massimo ", DoubleToString(g_maxSpreadPips, 1),
+            ". Se resta cosi' non verra' aperta alcuna posizione: verifica il limite ",
+            "o valuta se questo broker sia adatto allo scalping su questo simbolo.");
   }
 
 //+------------------------------------------------------------------+
@@ -519,6 +645,201 @@ void DetectSymbolProfile()
   }
 
 //+------------------------------------------------------------------+
+//| PROFILO OPERATIVO E ADATTAMENTO AL TIMEFRAME                     |
+//|                                                                  |
+//| Due trasformazioni distinte sugli stessi parametri:              |
+//|                                                                  |
+//| 1. TIMEFRAME. Passando da M1 a M5 l'ampiezza dei movimenti non    |
+//|    cresce di 5 volte ma di circa la radice di 5: le soglie        |
+//|    espresse in pips (banda ATR, stop minimo) vengono riscalate    |
+//|    con quella legge. Cio' che invece e' misurato in barre non si  |
+//|    tocca, mentre l'uscita a tempo segue linearmente la durata     |
+//|    della barra. Il timeframe direzionale viene alzato se e'       |
+//|    troppo vicino a quello di ingresso, dove sarebbe rumore.       |
+//|                                                                  |
+//| 2. AGGRESSIVITA'. Il profilo allarga o stringe i filtri di setup  |
+//|    e la frequenza. Restano pero' dei PAVIMENTI invalicabili sulla |
+//|    copertura dei costi e sul rischio/rendimento: sono cio' che    |
+//|    distingue uno scalper da un regalo di spread al broker, e      |
+//|    nessun profilo puo' spingerli sotto la soglia di sostenibilita'|
+//+------------------------------------------------------------------+
+void ApplyProfileAndTimeframe()
+  {
+   //=== 1) ADATTAMENTO AL TIMEFRAME ==================================
+   double volScale = 1.0;   // Le escursioni crescono con la radice del tempo
+   double barScale = 1.0;   // La durata cresce linearmente
+
+   g_adaptNote = "nessun adattamento";
+
+   if(AutoAdaptToTimeframe && g_entryTF > 1)
+     {
+      volScale = MathSqrt((double)g_entryTF);
+      barScale = (double)g_entryTF;
+      g_adaptNote = StringFormat("da M1 a %s: soglie in pips x%.2f, tempi x%.0f",
+                                 TimeframeToString(g_entryTF), volScale, barScale);
+     }
+
+   g_minATRPips    = MinATRPips        * volScale;
+   g_maxATRPips    = MaxATRPips        * volScale;
+   g_minSLPips     = MinSLPips         * volScale;
+   g_beLockPips    = BreakEvenLockPips * volScale;
+   g_trailStepPips = TrailStepPips     * volScale;
+   g_maxTradeMin   = (int)MathRound(MaxTradeMinutes * barScale);
+
+   //--- Timeframe direzionale: deve stare molto sopra quello di ingresso.
+   //    Se l'utente lo ha gia' messo abbastanza in alto, la sua scelta resta.
+   if(AutoAdaptToTimeframe && g_trendTF < g_entryTF * 5)
+     {
+      int ladder[6] = {PERIOD_M5, PERIOD_M15, PERIOD_M30, PERIOD_H1, PERIOD_H4, PERIOD_D1};
+      int wanted    = g_entryTF * 10;
+      int picked    = PERIOD_D1;
+
+      for(int i = 0; i < 6; i++)
+         if(ladder[i] >= wanted)
+           {
+            picked = ladder[i];
+            break;
+           }
+
+      if(picked != g_trendTF)
+        {
+         Print("[", TradeComment, "] Timeframe direzionale portato da ", TimeframeToString(g_trendTF),
+               " a ", TimeframeToString(picked), ": su ", TimeframeToString(g_entryTF),
+               " un contesto troppo vicino sarebbe rumore.");
+         g_trendTF = picked;
+        }
+     }
+
+   //=== 2) PROFILO DI AGGRESSIVITA' ==================================
+   double mBody = 1.0, mADX = 1.0, mTPCost = 1.0, mRR = 1.0;
+   double mSprATR = 1.0, mRisk = 1.0, mTrades = 1.0, mCool = 1.0;
+   double mVolBand = 1.0, mSpike = 1.0;
+   int    addPullback = 0, addRSI = 0, addLoss = 0, padSession = 0;
+   int    forceBreak  = -1;   // -1 = lascia l'input, 0 = disattiva, 1 = attiva
+   bool   wantSlope   = true;
+
+   switch(AggressionProfile)
+     {
+      case AGGR_CONSERVATIVE:
+         g_profileName = "CONSERVATIVO";
+         mBody = 1.40; mADX = 1.30; mTPCost = 1.20; mRR = 1.10;
+         mSprATR = 0.80; mRisk = 0.70; mTrades = 0.60; mCool = 1.50;
+         mVolBand = 0.80; mSpike = 0.85;
+         addRSI = -5; addLoss = -1; padSession = -15; forceBreak = 1;
+         break;
+
+      case AGGR_STANDARD:
+         g_profileName = "STANDARD";
+         break;
+
+      case AGGR_AGGRESSIVE:
+         g_profileName = "AGGRESSIVO";
+         mBody = 0.50; mADX = 0.60; mTPCost = 0.80; mRR = 0.90;
+         mSprATR = 1.25; mRisk = 1.50; mTrades = 2.00; mCool = 0.35;
+         mVolBand = 1.40; mSpike = 1.25;
+         addPullback = 2; addRSI = 8; addLoss = 1; padSession = 45;
+         forceBreak = 0; wantSlope = false;
+         break;
+
+      case AGGR_EXTREME:
+         g_profileName = "MOLTO AGGRESSIVO";
+         mBody = 0.25; mADX = 0.30; mTPCost = 0.60; mRR = 0.80;
+         mSprATR = 1.50; mRisk = 2.00; mTrades = 3.00; mCool = 0.00;
+         mVolBand = 1.90; mSpike = 1.50;
+         addPullback = 3; addRSI = 12; addLoss = 2; padSession = 120;
+         forceBreak = 0; wantSlope = false;
+         break;
+
+      default: // AGGR_CUSTOM
+         g_profileName = "PERSONALIZZATO";
+         break;
+     }
+
+   //--- Banda di volatilita' relativa: il profilo la allarga simmetricamente
+   //    attorno a 1.0, che e' la volatilita' abituale dello strumento.
+   g_minATRRatio = MathMax(MinATRRatio / mVolBand, 0.05);
+   g_maxATRRatio = MaxATRRatio * mVolBand;
+   g_spikeFactor = (SpikeATRFactor > 0.0 ? SpikeATRFactor * mSpike : 0.0);
+
+   //--- Filtri di setup
+   g_minBody      = MinBodyATR * mBody;
+   g_adxMin       = ADX_Min    * mADX;
+   g_pullbackBars = PullbackBars + addPullback;
+   g_rsiMaxEntry  = MathMin(RSI_MaxEntry + addRSI, 95.0);
+   g_requireBreak = (forceBreak < 0 ? RequireBreakout : (forceBreak == 1));
+   g_requireSlope = wantSlope;
+
+   if(g_rsiMaxEntry <= RSI_Mid + 5.0)
+      g_rsiMaxEntry = RSI_Mid + 5.0;
+
+   //--- Frequenza
+   g_maxTradesDay  = (MaxTradesPerDay  > 0 ? (int)MathMax(1, MathRound(MaxTradesPerDay  * mTrades)) : 0);
+   g_maxTradesHour = (MaxTradesPerHour > 0 ? (int)MathMax(1, MathRound(MaxTradesPerHour * mTrades)) : 0);
+   g_cooldownBars  = (int)MathMax(0, MathRound(CooldownBars * mCool));
+   g_maxConsecLoss = (int)MathMax(0, MaxConsecutiveLosses + addLoss);
+
+   //--- Rischio e costi, con i pavimenti che nessun profilo puo' superare
+   g_riskPercent  = MathMin(RiskPercent * mRisk, 10.0);
+   g_maxSpreadPips= (MaxSpreadPips > 0.0 ? MaxSpreadPips * mSprATR : 0.0);
+   g_minTPCost    = MathMax(MinTPCostRatio * mTPCost, 1.20);
+   g_minRR        = MathMax(MinRiskReward  * mRR,     1.00);
+   g_maxSpreadATR = (MaxSpreadToATR > 0.0 ? MathMin(MaxSpreadToATR * mSprATR, 0.60) : 0.0);
+
+   //--- Sessioni: il profilo le allarga o le stringe ai bordi
+   g_s1Start = ClampMinute(Session1StartHour * 60 + Session1StartMin - padSession);
+   g_s1End   = ClampMinute(Session1EndHour   * 60 + Session1EndMin   + padSession);
+   g_s2Start = ClampMinute(Session2StartHour * 60 + Session2StartMin - padSession);
+   g_s2End   = ClampMinute(Session2EndHour   * 60 + Session2EndMin   + padSession);
+
+   //--- Una finestra ridotta a nulla dal profilo conservativo torna al valore base
+   if(g_s1End <= g_s1Start)
+     {
+      g_s1Start = Session1StartHour * 60 + Session1StartMin;
+      g_s1End   = Session1EndHour   * 60 + Session1EndMin;
+     }
+   if(g_s2End <= g_s2Start)
+     {
+      g_s2Start = Session2StartHour * 60 + Session2StartMin;
+      g_s2End   = Session2EndHour   * 60 + Session2EndMin;
+     }
+
+   Print("[", TradeComment, "] Profilo ", g_profileName, " | ", g_adaptNote,
+         " | Rischio ", DoubleToString(g_riskPercent, 2), "%",
+         " | Trade max ", g_maxTradesDay, "/giorno ", g_maxTradesHour, "/ora",
+         " | Banda ATR ", DoubleToString(g_minATRRatio, 2), "-", DoubleToString(g_maxATRRatio, 2),
+         " volte la media a ", ATR_AvgPeriod, " barre",
+         " | SL min ", DoubleToString(g_minSLPips, 1), " pips",
+         " | TP/costi x", DoubleToString(g_minTPCost, 2),
+         " | R:R min ", DoubleToString(g_minRR, 2),
+         " | Uscita a tempo ", g_maxTradeMin, " min",
+         " | Sessioni ", MinuteToHM(g_s1Start), "-", MinuteToHM(g_s1End),
+         " e ", MinuteToHM(g_s2Start), "-", MinuteToHM(g_s2End));
+
+   if(AggressionProfile == AGGR_EXTREME)
+      Print("[", TradeComment, "] ATTENZIONE: profilo MOLTO AGGRESSIVO. Frequenza e drawdown ",
+            "crescono insieme, e il rischio per operazione e' il doppio di quello impostato. ",
+            "Usalo solo dopo averlo verificato in backtest e in demo.");
+  }
+
+//+------------------------------------------------------------------+
+//| Minuto del giorno riportato dentro l'intervallo valido           |
+//+------------------------------------------------------------------+
+int ClampMinute(int minute)
+  {
+   if(minute < 0)     return(0);
+   if(minute > 1439)  return(1439);
+   return(minute);
+  }
+
+//+------------------------------------------------------------------+
+//| Minuto del giorno in formato hh:mm                               |
+//+------------------------------------------------------------------+
+string MinuteToHM(int minute)
+  {
+   return(StringFormat("%02d:%02d", minute / 60, minute % 60));
+  }
+
+//+------------------------------------------------------------------+
 //| Validazione degli input                                          |
 //+------------------------------------------------------------------+
 bool ValidateInputs()
@@ -551,6 +872,12 @@ bool ValidateInputs()
 
    if(MinATRPips > 0.0 && MaxATRPips > 0.0 && MinATRPips >= MaxATRPips)
      { Print("ERRORE INPUT: MinATRPips deve essere minore di MaxATRPips."); ok = false; }
+
+   if(ATR_AvgPeriod < 5)
+     { Print("ERRORE INPUT: ATR_AvgPeriod deve essere >= 5 per misurare una volatilita' abituale."); ok = false; }
+
+   if(MinATRRatio <= 0.0 || MaxATRRatio <= 0.0 || MinATRRatio >= MaxATRRatio)
+     { Print("ERRORE INPUT: banda ATR non valida (0 < MinATRRatio < MaxATRRatio)."); ok = false; }
 
    if(RSI_Mid <= 0.0 || RSI_Mid >= 100.0 || RSI_MaxEntry <= RSI_Mid || RSI_MaxEntry >= 100.0)
      { Print("ERRORE INPUT: soglie RSI non valide (0 < RSI_Mid < RSI_MaxEntry < 100)."); ok = false; }
@@ -594,9 +921,15 @@ bool ValidateInputs()
             ") non e' inferiore al target (", DoubleToString(RewardRatio, 2),
             "): la parziale non scattera' mai prima del TP.");
 
-   if(g_entryTF > PERIOD_M5)
+   if(g_entryTF > PERIOD_M5 && !AutoAdaptToTimeframe)
       Print("ATTENZIONE: EntryTimeframe = ", TimeframeToString(g_entryTF),
-            ". Questo EA e' tarato per M1: su timeframe piu' lenti i parametri vanno rivisti.");
+            " con AutoAdaptToTimeframe disattivo. I parametri restano tarati su M1: ",
+            "attiva l'adattamento oppure rivedi banda ATR, stop minimo e uscita a tempo.");
+
+   if(g_trendTF < g_entryTF * 3)
+      Print("ATTENZIONE: timeframe direzionale ", TimeframeToString(g_trendTF),
+            " troppo vicino a quello di ingresso ", TimeframeToString(g_entryTF),
+            ": la direzione che ne esce e' rumore, non contesto.");
 
    if(!g_isGold)
       Print("ATTENZIONE: ", Symbol(), " non sembra un simbolo su oro. ",
@@ -618,7 +951,8 @@ bool ValidHM(int hour, int minute)
 //+------------------------------------------------------------------+
 bool HasEnoughBars()
   {
-   int needEntry = (int)MathMax(SlowEMA, MathMax(ATR_Period, RSI_Period)) + PullbackBars + 10;
+   //--- La media dell'ATR guarda indietro ATR_AvgPeriod barre oltre l'ATR stesso
+   int needEntry = (int)MathMax(SlowEMA, MathMax(ATR_Period + ATR_AvgPeriod, RSI_Period)) + g_pullbackBars + 10;
    int needTrend = (int)MathMax(BiasSlowPeriod + BiasSlopeBars, ADX_Period) + 10;
 
    bool ok = true;
@@ -665,17 +999,23 @@ int GetBias(string &info, bool silent)
    if(UseADXFilter)
      {
       double adx = iADX(Symbol(), g_trendTF, ADX_Period, PRICE_CLOSE, MODE_MAIN, 1);
-      if(adx < ADX_Min)
+      if(adx < g_adxMin)
         {
          info = StringFormat("ADX %s %.1f sotto il minimo %.1f: mercato senza direzione",
-                             TimeframeToString(g_trendTF), adx, ADX_Min);
+                             TimeframeToString(g_trendTF), adx, g_adxMin);
          if(!silent) SetReject(info);
          return(0);
         }
      }
 
-   bool upStack   = (emaFast > emaSlow && close > emaFast && emaSlow > emaSlowPrev);
-   bool downStack = (emaFast < emaSlow && close < emaFast && emaSlow < emaSlowPrev);
+   //--- La pendenza della EMA lenta e' una conferma in piu': i profili
+   //    aggressivi la lasciano cadere e si accontentano dell'allineamento,
+   //    accettando piu' ingressi in cambio di piu' falsi segnali.
+   bool slopeUp   = (!g_requireSlope || emaSlow > emaSlowPrev);
+   bool slopeDown = (!g_requireSlope || emaSlow < emaSlowPrev);
+
+   bool upStack   = (emaFast > emaSlow && close > emaFast && slopeUp);
+   bool downStack = (emaFast < emaSlow && close < emaFast && slopeDown);
 
    if(upStack)
      {
@@ -725,19 +1065,19 @@ int GetScalpSignal(int bias, string &info, bool silent)
    double low2   = iLow(Symbol(),   g_entryTF, 2);
 
    //--- Guardia anti-spike: una candela da notizia non e' un setup
-   if(SpikeATRFactor > 0.0 && (high1 - low1) > atr * SpikeATRFactor)
+   if(g_spikeFactor > 0.0 && (high1 - low1) > atr * g_spikeFactor)
      {
       info = StringFormat("barra anomala %.1f pips (oltre %.1fx ATR): possibile notizia",
-                          (high1 - low1) / g_pip, SpikeATRFactor);
+                          (high1 - low1) / g_pip, g_spikeFactor);
       if(!silent) SetReject(info);
       return(0);
      }
 
    //--- Corpo minimo: le indecisioni non innescano
-   if(MinBodyATR > 0.0 && MathAbs(close1 - open1) < atr * MinBodyATR)
+   if(g_minBody > 0.0 && MathAbs(close1 - open1) < atr * g_minBody)
      {
       info = StringFormat("corpo della barra %.1f pips sotto il minimo richiesto %.1f",
-                          MathAbs(close1 - open1) / g_pip, atr * MinBodyATR / g_pip);
+                          MathAbs(close1 - open1) / g_pip, atr * g_minBody / g_pip);
       if(!silent) SetReject(info);
       return(0);
      }
@@ -745,7 +1085,7 @@ int GetScalpSignal(int bias, string &info, bool silent)
    //--- Il pullback deve essere avvenuto entro le ultime PullbackBars barre:
    //    il prezzo e' tornato a toccare la EMA veloce prima di ripartire.
    bool pullback = false;
-   for(int k = 1; k <= PullbackBars; k++)
+   for(int k = 1; k <= g_pullbackBars; k++)
      {
       double emaK = iMA(Symbol(), g_entryTF, FastEMA, 0, MODE_EMA, PRICE_CLOSE, k);
       if(bias > 0 && iLow(Symbol(), g_entryTF, k) <= emaK)
@@ -756,7 +1096,7 @@ int GetScalpSignal(int bias, string &info, bool silent)
 
    if(!pullback)
      {
-      info = StringFormat("nessun ritracciamento sulla EMA%d nelle ultime %d barre", FastEMA, PullbackBars);
+      info = StringFormat("nessun ritracciamento sulla EMA%d nelle ultime %d barre", FastEMA, g_pullbackBars);
       if(!silent) SetReject(info);
       return(0);
      }
@@ -776,7 +1116,7 @@ int GetScalpSignal(int bias, string &info, bool silent)
          if(!silent) SetReject(info);
          return(0);
         }
-      if(RequireBreakout && high1 <= high2)
+      if(g_requireBreak && high1 <= high2)
         {
          info = "manca la rottura del massimo precedente";
          if(!silent) SetReject(info);
@@ -788,9 +1128,9 @@ int GetScalpSignal(int bias, string &info, bool silent)
          if(!silent) SetReject(info);
          return(0);
         }
-      if(rsi >= RSI_MaxEntry)
+      if(rsi >= g_rsiMaxEntry)
         {
-         info = StringFormat("RSI %.1f oltre %.1f: movimento gia' esteso", rsi, RSI_MaxEntry);
+         info = StringFormat("RSI %.1f oltre %.1f: movimento gia' esteso", rsi, g_rsiMaxEntry);
          if(!silent) SetReject(info);
          return(0);
         }
@@ -812,7 +1152,7 @@ int GetScalpSignal(int bias, string &info, bool silent)
       if(!silent) SetReject(info);
       return(0);
      }
-   if(RequireBreakout && low1 >= low2)
+   if(g_requireBreak && low1 >= low2)
      {
       info = "manca la rottura del minimo precedente";
       if(!silent) SetReject(info);
@@ -824,9 +1164,9 @@ int GetScalpSignal(int bias, string &info, bool silent)
       if(!silent) SetReject(info);
       return(0);
      }
-   if(rsi <= 100.0 - RSI_MaxEntry)
+   if(rsi <= 100.0 - g_rsiMaxEntry)
      {
-      info = StringFormat("RSI %.1f sotto %.1f: movimento gia' esteso", rsi, 100.0 - RSI_MaxEntry);
+      info = StringFormat("RSI %.1f sotto %.1f: movimento gia' esteso", rsi, 100.0 - g_rsiMaxEntry);
       if(!silent) SetReject(info);
       return(0);
      }
@@ -887,7 +1227,7 @@ bool BuildStopDistances(double atr, double &slDistance, double &tpDistance, stri
      }
 
    //--- Stop teorico: ATR, con un pavimento in pips per non finire dentro il rumore
-   double baseSL   = MathMax(atr * SL_ATR, MinSLPips * g_pip);
+   double baseSL   = MathMax(atr * SL_ATR, g_minSLPips * g_pip);
    double minDist  = BrokerMinStopDistance();
    double spread   = MathMax(Ask - Bid, 0.0);
    double commDist = CommissionPriceEquivalent();
@@ -924,10 +1264,10 @@ bool BuildStopDistances(double atr, double &slDistance, double &tpDistance, stri
 
    //--- CONTROLLO 3: il target copre i costi con margine?
    double cost = spread + commDist;
-   if(MinTPCostRatio > 0.0 && cost > 0.0 && tpDistance < cost * MinTPCostRatio)
+   if(g_minTPCost > 0.0 && cost > 0.0 && tpDistance < cost * g_minTPCost)
      {
       note = StringFormat("TP %.1f pips insufficiente: costo operazione %.1f pips (x%.1f, richiesto x%.1f)",
-                          tpDistance / g_pip, cost / g_pip, tpDistance / cost, MinTPCostRatio);
+                          tpDistance / g_pip, cost / g_pip, tpDistance / cost, g_minTPCost);
       slDistance = 0.0;
       tpDistance = 0.0;
       return(false);
@@ -935,9 +1275,9 @@ bool BuildStopDistances(double atr, double &slDistance, double &tpDistance, stri
 
    //--- CONTROLLO 4: rapporto rischio/rendimento residuo
    double rr = tpDistance / slDistance;
-   if(MinRiskReward > 0.0 && rr < MinRiskReward)
+   if(g_minRR > 0.0 && rr < g_minRR)
      {
-      note = StringFormat("R:R effettivo 1:%.2f sotto il minimo 1:%.2f", rr, MinRiskReward);
+      note = StringFormat("R:R effettivo 1:%.2f sotto il minimo 1:%.2f", rr, g_minRR);
       slDistance = 0.0;
       tpDistance = 0.0;
       return(false);
@@ -1413,7 +1753,7 @@ double RiskAmount()
    double capital = (RiskBase == RISK_ON_EQUITY) ? AccountEquity() : AccountBalance();
    if(capital <= 0.0)
       return(0.0);
-   return(capital * RiskPercent / 100.0);
+   return(capital * g_riskPercent / 100.0);
   }
 
 //+------------------------------------------------------------------+
@@ -1455,7 +1795,7 @@ double RegistryRisk(datetime openTime, double openPrice, double currentSL, doubl
 
    double risk = (currentSL > 0.0 ? MathAbs(openPrice - currentSL) : 0.0);
    if(risk <= 0.0)
-      risk = MathMax(atr * SL_ATR, MinSLPips * g_pip);
+      risk = MathMax(atr * SL_ATR, g_minSLPips * g_pip);
 
    RegistrySet(openTime, risk, false);
    return(risk);
@@ -1547,7 +1887,7 @@ void RebuildRegistry()
 
       double risk = (OrderStopLoss() > 0.0 ? MathAbs(OrderOpenPrice() - OrderStopLoss()) : 0.0);
       if(risk <= 0.0)
-         risk = MathMax(atr * SL_ATR, MinSLPips * g_pip);
+         risk = MathMax(atr * SL_ATR, g_minSLPips * g_pip);
 
       //--- Posizione ereditata: la parziale si considera gia' fatta, per non
       //    ridurre due volte un volume che non sappiamo da dove arrivi.
@@ -1595,12 +1935,12 @@ void ManageOpenPositions()
       double rMultiple   = (riskDist > 0.0 ? profitPrice / riskDist : 0.0);
 
       //--- 1) USCITA A TEMPO: uno scalp M1 che non si risolve va chiuso
-      if(MaxTradeMinutes > 0 && TimeCurrent() - openTime >= MaxTradeMinutes * 60)
+      if(g_maxTradeMin > 0 && TimeCurrent() - openTime >= g_maxTradeMin * 60)
         {
          if(!TimeExitOnlyIfProfit || profitPrice > 0.0)
            {
             Print("[", TradeComment, "] Uscita a tempo sul ticket ", ticket,
-                  " dopo ", MaxTradeMinutes, " minuti (", DoubleToString(rMultiple, 2), " R).");
+                  " dopo ", g_maxTradeMin, " minuti (", DoubleToString(rMultiple, 2), " R).");
             ClosePositionByTicket(ticket);
             break;   // La lista degli ordini e' cambiata: si riparte al tick successivo
            }
@@ -1639,7 +1979,7 @@ void ManageOpenPositions()
         {
          if(EnableBreakEven && rMultiple >= BreakEvenR)
            {
-            double bePrice = NormalizeDouble(openPrice + BreakEvenLockPips * g_pip, Digits);
+            double bePrice = NormalizeDouble(openPrice + g_beLockPips * g_pip, Digits);
             if(bePrice > newSL + Point / 2.0 && Bid - bePrice >= minDist)
                newSL = bePrice;
            }
@@ -1647,7 +1987,7 @@ void ManageOpenPositions()
          if(EnableTrailingStop && rMultiple >= TrailStartR && atr > 0.0)
            {
             double trailPrice = NormalizeDouble(Bid - atr * TrailATR, Digits);
-            if(trailPrice > newSL + TrailStepPips * g_pip - Point / 2.0 && Bid - trailPrice >= minDist)
+            if(trailPrice > newSL + g_trailStepPips * g_pip - Point / 2.0 && Bid - trailPrice >= minDist)
                newSL = trailPrice;
            }
 
@@ -1665,7 +2005,7 @@ void ManageOpenPositions()
         {
          if(EnableBreakEven && rMultiple >= BreakEvenR)
            {
-            double bePriceS = NormalizeDouble(openPrice - BreakEvenLockPips * g_pip, Digits);
+            double bePriceS = NormalizeDouble(openPrice - g_beLockPips * g_pip, Digits);
             if((newSL <= 0.0 || bePriceS < newSL - Point / 2.0) && bePriceS - Ask >= minDist)
                newSL = bePriceS;
            }
@@ -1673,7 +2013,7 @@ void ManageOpenPositions()
          if(EnableTrailingStop && rMultiple >= TrailStartR && atr > 0.0)
            {
             double trailPriceS = NormalizeDouble(Ask + atr * TrailATR, Digits);
-            if((newSL <= 0.0 || trailPriceS < newSL - TrailStepPips * g_pip + Point / 2.0) &&
+            if((newSL <= 0.0 || trailPriceS < newSL - g_trailStepPips * g_pip + Point / 2.0) &&
                trailPriceS - Ask >= minDist)
                newSL = trailPriceS;
            }
@@ -1714,17 +2054,17 @@ int CountOwnPositions()
 //+------------------------------------------------------------------+
 bool AreTradeCountsOk(bool silent)
   {
-   if(MaxTradesPerDay > 0 && g_tradesToday >= MaxTradesPerDay)
+   if(g_maxTradesDay > 0 && g_tradesToday >= g_maxTradesDay)
      {
       if(!silent)
-         SetReject(StringFormat("limite di %d trade giornalieri raggiunto", MaxTradesPerDay));
+         SetReject(StringFormat("limite di %d trade giornalieri raggiunto", g_maxTradesDay));
       return(false);
      }
 
-   if(MaxTradesPerHour > 0 && g_tradesThisHour >= MaxTradesPerHour)
+   if(g_maxTradesHour > 0 && g_tradesThisHour >= g_maxTradesHour)
      {
       if(!silent)
-         SetReject(StringFormat("limite di %d trade in un'ora raggiunto", MaxTradesPerHour));
+         SetReject(StringFormat("limite di %d trade in un'ora raggiunto", g_maxTradesHour));
       return(false);
      }
 
@@ -1745,7 +2085,7 @@ bool IsInCooldown(bool silent)
       return(true);
      }
 
-   if(CooldownBars <= 0)
+   if(g_cooldownBars <= 0)
       return(false);
 
    datetime reference = g_lastTradeTime;
@@ -1764,10 +2104,10 @@ bool IsInCooldown(bool silent)
    if(reference <= 0)
       return(false);
 
-   if(iBarShift(Symbol(), g_entryTF, reference, false) < CooldownBars)
+   if(iBarShift(Symbol(), g_entryTF, reference, false) < g_cooldownBars)
      {
       if(!silent)
-         SetReject(StringFormat("attesa di %d barre dopo l'ultima operazione", CooldownBars));
+         SetReject(StringFormat("attesa di %d barre dopo l'ultima operazione", g_cooldownBars));
       return(true);
      }
 
@@ -1782,22 +2122,22 @@ bool IsSpreadAcceptable(bool silent)
   {
    double spread = MathMax(Ask - Bid, 0.0);
 
-   if(MaxSpreadPips > 0.0 && spread / g_pip > MaxSpreadPips)
+   if(g_maxSpreadPips > 0.0 && spread / g_pip > g_maxSpreadPips)
      {
       if(!silent)
          SetReject(StringFormat("spread %.1f pips oltre il massimo assoluto %.1f",
-                                spread / g_pip, MaxSpreadPips));
+                                spread / g_pip, g_maxSpreadPips));
       return(false);
      }
 
-   if(MaxSpreadToATR > 0.0)
+   if(g_maxSpreadATR > 0.0)
      {
       double atr = iATR(Symbol(), g_entryTF, ATR_Period, 1);
-      if(atr > 0.0 && spread > atr * MaxSpreadToATR)
+      if(atr > 0.0 && spread > atr * g_maxSpreadATR)
         {
          if(!silent)
             SetReject(StringFormat("spread %.1f pips = %.0f%% dell'ATR (max %.0f%%)",
-                                   spread / g_pip, spread / atr * 100.0, MaxSpreadToATR * 100.0));
+                                   spread / g_pip, spread / atr * 100.0, g_maxSpreadATR * 100.0));
          return(false);
         }
      }
@@ -1806,7 +2146,37 @@ bool IsSpreadAcceptable(bool silent)
   }
 
 //+------------------------------------------------------------------+
-//| Filtro volatilita': banda ATR minima e massima                    |
+//| ATR abituale: media dell'ATR sulle ultime N barre chiuse          |
+//+------------------------------------------------------------------+
+double GetAverageATR(int timeframe, int period, int startShift)
+  {
+   if(period < 1)
+      return(0.0);
+
+   double sum   = 0.0;
+   int    valid = 0;
+
+   for(int i = 0; i < period; i++)
+     {
+      double v = iATR(Symbol(), timeframe, ATR_Period, startShift + i);
+      if(v > 0.0)
+        {
+         sum += v;
+         valid++;
+        }
+     }
+
+   return(valid > 0 ? sum / valid : 0.0);
+  }
+
+//+------------------------------------------------------------------+
+//| FILTRO VOLATILITA'                                                |
+//| Il confronto e' con la volatilita' ABITUALE dello strumento, non  |
+//| con un numero fisso di pips: l'ATR "normale" dell'oro dipende dal |
+//| livello del prezzo, dal broker e dal periodo, e una soglia        |
+//| assoluta finirebbe per bloccare l'operativita' per giorni interi  |
+//| anche in assenza di qualunque notizia.                            |
+//| I limiti assoluti restano applicabili, ma solo se impostati.      |
 //+------------------------------------------------------------------+
 bool IsVolatilityAcceptable(bool silent)
   {
@@ -1815,20 +2185,43 @@ bool IsVolatilityAcceptable(bool silent)
       return(false);
 
    double atrPips = atr / g_pip;
+   double avgATR  = GetAverageATR(g_entryTF, ATR_AvgPeriod, 1);
+   double ratio   = (avgATR > 0.0 ? atr / avgATR : 0.0);
 
-   if(MinATRPips > 0.0 && atrPips < MinATRPips)
+   //--- Confronto relativo (filtro principale)
+   if(ratio > 0.0)
+     {
+      if(g_minATRRatio > 0.0 && ratio < g_minATRRatio)
+        {
+         if(!silent)
+            SetReject(StringFormat("ATR %.1f pips = %.2fx la media (minimo %.2fx): mercato fermo",
+                                   atrPips, ratio, g_minATRRatio));
+         return(false);
+        }
+
+      if(g_maxATRRatio > 0.0 && ratio > g_maxATRRatio)
+        {
+         if(!silent)
+            SetReject(StringFormat("ATR %.1f pips = %.2fx la media (massimo %.2fx): volatilita' anomala",
+                                   atrPips, ratio, g_maxATRRatio));
+         return(false);
+        }
+     }
+
+   //--- Rete di sicurezza assoluta, attiva solo se impostata
+   if(g_minATRPips > 0.0 && atrPips < g_minATRPips)
      {
       if(!silent)
-         SetReject(StringFormat("ATR %.1f pips sotto il minimo %.1f: mercato troppo lento",
-                                atrPips, MinATRPips));
+         SetReject(StringFormat("ATR %.1f pips sotto il minimo assoluto %.1f",
+                                atrPips, g_minATRPips));
       return(false);
      }
 
-   if(MaxATRPips > 0.0 && atrPips > MaxATRPips)
+   if(g_maxATRPips > 0.0 && atrPips > g_maxATRPips)
      {
       if(!silent)
-         SetReject(StringFormat("ATR %.1f pips oltre il massimo %.1f: volatilita' da notizia",
-                                atrPips, MaxATRPips));
+         SetReject(StringFormat("ATR %.1f pips oltre il massimo assoluto %.1f",
+                                atrPips, g_maxATRPips));
       return(false);
      }
 
@@ -1868,20 +2261,19 @@ bool IsSessionAllowed(bool silent)
    if(!UseSessionFilter)
       return(true);
 
+   //--- Finestre effettive: il profilo di aggressivita' le allarga o le stringe
    bool inside = false;
 
-   if(UseSession1 && InWindow(nowMin, Session1StartHour * 60 + Session1StartMin,
-                                      Session1EndHour   * 60 + Session1EndMin))
+   if(UseSession1 && InWindow(nowMin, g_s1Start, g_s1End))
       inside = true;
 
-   if(!inside && UseSession2 && InWindow(nowMin, Session2StartHour * 60 + Session2StartMin,
-                                                 Session2EndHour   * 60 + Session2EndMin))
+   if(!inside && UseSession2 && InWindow(nowMin, g_s2Start, g_s2End))
       inside = true;
 
    if(!inside && !silent)
-      SetReject(StringFormat("fuori dalle finestre operative (%02d:%02d-%02d:%02d / %02d:%02d-%02d:%02d server)",
-                             Session1StartHour, Session1StartMin, Session1EndHour, Session1EndMin,
-                             Session2StartHour, Session2StartMin, Session2EndHour, Session2EndMin));
+      SetReject("fuori dalle finestre operative (" +
+                MinuteToHM(g_s1Start) + "-" + MinuteToHM(g_s1End) + " / " +
+                MinuteToHM(g_s2Start) + "-" + MinuteToHM(g_s2End) + " ora del server)");
 
    return(inside);
   }
@@ -2021,7 +2413,7 @@ void UpdateTradeStats()
    ArrayInitialize(recentNet,  0.0);
 
    int      recentCount = 0;
-   int      recentMax   = (MaxConsecutiveLosses > 0 ? (int)MathMin(MaxConsecutiveLosses + 1, 10) : 0);
+   int      recentMax   = (g_maxConsecLoss > 0 ? (int)MathMin(g_maxConsecLoss + 1, 10) : 0);
 
    //--- Ore di apertura distinte: contano gli ingressi, non i record
    datetime dayOpens[];
@@ -2114,8 +2506,8 @@ void UpdateTradeStats()
 
    datetime lastLossTime = (recentCount > 0 ? (datetime)(long)recentTime[0] : 0);
 
-   if(MaxConsecutiveLosses > 0 && CooldownMinutes > 0 &&
-      g_consecLosses >= MaxConsecutiveLosses && recentCount > 0 &&
+   if(g_maxConsecLoss > 0 && CooldownMinutes > 0 &&
+      g_consecLosses >= g_maxConsecLoss && recentCount > 0 &&
       lastLossTime > g_lastLossHandled)
      {
       g_lastLossHandled = lastLossTime;
@@ -2553,7 +2945,7 @@ void UpdatePanel()
    PanelRect(g_prefix + "h_bg", 0, PanelY, PanelWidth, headerH + 4, PanelBgColor, PanelBorderColor, 0);
    PanelRect(g_prefix + "h_hdr", 1, PanelY + 1, PanelWidth - 2, headerH, PanelHeaderColor, PanelHeaderColor, 1);
 
-   PanelText(g_prefix + "h_title", g_pad, PanelY + 6, "GOLD SCALPER M1",
+   PanelText(g_prefix + "h_title", g_pad, PanelY + 6, "GOLD SCALPER " + TimeframeToString(g_entryTF),
              PanelTitleColor, PanelFontSize + 2, ANCHOR_LEFT_UPPER, PanelFont);
 
    //--- Pulsanti: pausa, chiusura, riduci
@@ -2629,6 +3021,21 @@ void UpdatePanel()
    PanelTile(2, y, tileH, "tot", "TOTALE EA",   MoneyStr(totalPL), SignColor(totalPL));
    y += tileH + 8;
 
+   //--- ASSETTO ------------------------------------------------------------
+   //    Cio' che l'EA sta davvero applicando dopo profilo e adattamento.
+   PanelSection(y, "cfg", "ASSETTO OPERATIVO");
+
+   color profCol = (AggressionProfile == AGGR_EXTREME ? PanelNegativeColor
+                   : (AggressionProfile == AGGR_AGGRESSIVE ? PanelWarningColor : PanelValueColor));
+   PanelRow(y, "cprof", "Profilo", g_profileName, profCol);
+   PanelRow(y, "cadapt", "Adattamento", (AutoAdaptToTimeframe ? Shorten(g_adaptNote, 26) : "disattivo"),
+            PanelCaptionColor);
+   PanelRow(y, "climit", "Rischio / trade max",
+            DoubleToString(g_riskPercent, 2) + " %   " +
+            (g_maxTradesDay > 0 ? IntegerToString(g_maxTradesDay) : "inf") + "/g  " +
+            (g_maxTradesHour > 0 ? IntegerToString(g_maxTradesHour) : "inf") + "/h",
+            PanelValueColor);
+
    //--- MERCATO -----------------------------------------------------------
    PanelSection(y, "mkt", "MERCATO   " + Symbol() + "  " + TimeframeToString(g_entryTF) +
                           " / " + TimeframeToString(g_trendTF));
@@ -2639,19 +3046,28 @@ void UpdatePanel()
 
    PanelRow(y, "adx", "ADX(" + IntegerToString(ADX_Period) + ")",
             (hasBars ? DoubleToString(adx, 1) : "-"),
-            (!UseADXFilter ? PanelValueColor : (adx >= ADX_Min ? PanelPositiveColor : PanelWarningColor)));
+            (!UseADXFilter ? PanelValueColor : (adx >= g_adxMin ? PanelPositiveColor : PanelWarningColor)));
 
-   PanelRow(y, "atr", "ATR(" + IntegerToString(ATR_Period) + ") M1",
-            (atr > 0.0 ? PipStr(atr) : "-"),
-            (atr <= 0.0 ? PanelValueColor
-                        : ((MinATRPips > 0.0 && atr / g_pip < MinATRPips) ||
-                           (MaxATRPips > 0.0 && atr / g_pip > MaxATRPips) ? PanelWarningColor : PanelValueColor)));
+   //--- ATR corrente e, soprattutto, quanto vale rispetto alla sua media:
+   //    e' il rapporto a decidere, non il valore assoluto in pips.
+   double avgATR   = (hasBars ? GetAverageATR(g_entryTF, ATR_AvgPeriod, 1) : 0.0);
+   double atrRatio = (avgATR > 0.0 ? atr / avgATR : 0.0);
+   bool   volOutOfBand = (atrRatio > 0.0 &&
+                          (atrRatio < g_minATRRatio || atrRatio > g_maxATRRatio));
+
+   PanelRow(y, "atr", "ATR(" + IntegerToString(ATR_Period) + ") " + TimeframeToString(g_entryTF),
+            (atr > 0.0 ? PipStr(atr) : "-"), PanelValueColor);
+
+   PanelRow(y, "atrr", "ATR / media (banda " + DoubleToString(g_minATRRatio, 2) +
+            "-" + DoubleToString(g_maxATRRatio, 2) + ")",
+            (atrRatio > 0.0 ? DoubleToString(atrRatio, 2) + " x" : "-"),
+            (atrRatio <= 0.0 ? PanelValueColor : (volOutOfBand ? PanelWarningColor : PanelPositiveColor)));
 
    //--- Barra dello spread rispetto al limite operativo
-   double spreadLimit = MaxSpreadPips * g_pip;
-   if(MaxSpreadToATR > 0.0 && atr > 0.0)
+   double spreadLimit = g_maxSpreadPips * g_pip;
+   if(g_maxSpreadATR > 0.0 && atr > 0.0)
      {
-      double relLimit = atr * MaxSpreadToATR;
+      double relLimit = atr * g_maxSpreadATR;
       if(spreadLimit <= 0.0 || relLimit < spreadLimit)
          spreadLimit = relLimit;
      }
@@ -2690,10 +3106,10 @@ void UpdatePanel()
    PanelRow(y, "psl",  "Stop Loss",        (distOk ? PipStr(slDist) : "-"), (distOk ? PanelValueColor : PanelWarningColor));
    PanelRow(y, "ptp",  "Take Profit",      (distOk ? PipStr(tpDist) : "-"), (distOk ? PanelValueColor : PanelWarningColor));
    PanelRow(y, "prr",  "Rischio/Rendimento", (rrEff > 0.0 ? "1 : " + DoubleToString(rrEff, 2) : "-"),
-            (rrEff >= MinRiskReward ? PanelPositiveColor : PanelWarningColor));
+            (rrEff >= g_minRR ? PanelPositiveColor : PanelWarningColor));
    PanelRow(y, "plot", "Volume stimato",   (nextLots > 0.0 ? DoubleToString(nextLots, g_lotDigits) : "n/d"),
             (nextLots > 0.0 ? PanelValueColor : PanelWarningColor));
-   PanelRow(y, "prsk", "Rischio",          DoubleToString(RiskPercent, 2) + " %  (" +
+   PanelRow(y, "prsk", "Rischio",          DoubleToString(g_riskPercent, 2) + " %  (" +
             DoubleToString(RiskAmount(), 2) + " " + AccountCurrency() + ")", PanelValueColor);
 
    //--- POSIZIONE APERTA ---------------------------------------------------
@@ -2715,7 +3131,7 @@ void UpdatePanel()
                (isBuy ? PanelPositiveColor : PanelNegativeColor));
       PanelRow(y, "popn", "Ingresso / Durata",
                DoubleToString(openPrice, Digits) + "   " + IntegerToString(minutes) + " min",
-               (MaxTradeMinutes > 0 && minutes >= MaxTradeMinutes - 5 ? PanelWarningColor : PanelValueColor));
+               (g_maxTradeMin > 0 && minutes >= g_maxTradeMin - 5 ? PanelWarningColor : PanelValueColor));
       PanelRow(y, "pstp", "SL / TP",
                (OrderStopLoss() > 0.0 ? DoubleToString(OrderStopLoss(), Digits) : "-") + "  /  " +
                (OrderTakeProfit() > 0.0 ? DoubleToString(OrderTakeProfit(), Digits) : "-"), PanelValueColor);
@@ -2752,21 +3168,21 @@ void UpdatePanel()
                  reached, PanelPositiveColor, PanelValueColor);
      }
 
-   if(MaxTradesPerDay > 0)
+   if(g_maxTradesDay > 0)
       PanelMeter(y, "dtrd", "Trade usati oggi",
-                 IntegerToString(g_tradesToday) + " / " + IntegerToString(MaxTradesPerDay),
-                 (double)g_tradesToday / MaxTradesPerDay,
-                 (g_tradesToday >= MaxTradesPerDay ? PanelNegativeColor : PanelAccentColor), PanelValueColor);
+                 IntegerToString(g_tradesToday) + " / " + IntegerToString(g_maxTradesDay),
+                 (double)g_tradesToday / g_maxTradesDay,
+                 (g_tradesToday >= g_maxTradesDay ? PanelNegativeColor : PanelAccentColor), PanelValueColor);
    else
       PanelRow(y, "dtrdn", "Trade oggi", IntegerToString(g_tradesToday), PanelValueColor);
 
    PanelRow(y, "dhour", "Trade nell'ora",
-            IntegerToString(g_tradesThisHour) + (MaxTradesPerHour > 0 ? " / " + IntegerToString(MaxTradesPerHour) : ""),
-            (MaxTradesPerHour > 0 && g_tradesThisHour >= MaxTradesPerHour ? PanelNegativeColor : PanelValueColor));
+            IntegerToString(g_tradesThisHour) + (g_maxTradesHour > 0 ? " / " + IntegerToString(g_maxTradesHour) : ""),
+            (g_maxTradesHour > 0 && g_tradesThisHour >= g_maxTradesHour ? PanelNegativeColor : PanelValueColor));
 
    PanelRow(y, "dloss2", "Perdite consecutive",
-            IntegerToString(g_consecLosses) + (MaxConsecutiveLosses > 0 ? " / " + IntegerToString(MaxConsecutiveLosses) : ""),
-            (MaxConsecutiveLosses > 0 && g_consecLosses >= MaxConsecutiveLosses ? PanelNegativeColor : PanelValueColor));
+            IntegerToString(g_consecLosses) + (g_maxConsecLoss > 0 ? " / " + IntegerToString(g_maxConsecLoss) : ""),
+            (g_maxConsecLoss > 0 && g_consecLosses >= g_maxConsecLoss ? PanelNegativeColor : PanelValueColor));
 
    //--- STORICO DELL'EA ------------------------------------------------------
    PanelSection(y, "sta", "STORICO EA  (magic " + IntegerToString(MagicNumber) + ")");

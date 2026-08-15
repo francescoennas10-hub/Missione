@@ -4,7 +4,7 @@ Due Expert Advisor, due orizzonti operativi diversi sullo stesso strumento:
 
 | EA | File | Strumento / timeframe | Idea |
 |---|---|---|---|
-| **Gold Scalper M1** | `MQL4/Experts/GoldScalperM1.mq4` | XAUUSD, **M1** (direzione da M15) | scalping su pullback, con dashboard operativa |
+| **Gold Scalper M1** | `MQL4/Experts/GoldScalperM1.mq4` | XAUUSD, **M1 e M5** (direzione da M15/H1) | scalping su pullback, profilo di aggressivita', dashboard operativa |
 | **Adaptive Regime EA** | `MQL4/Experts/AdaptiveRegimeEA.mq4` | XAUUSD, M5/M15 (regime da H1) | trend following o mean reversion secondo il regime |
 
 ## Installazione (vale per entrambi)
@@ -16,126 +16,139 @@ Due Expert Advisor, due orizzonti operativi diversi sullo stesso strumento:
 
 ---
 
-# Gold Scalper M1 v1.00
+# Gold Scalper M1 v1.10
 
-Scalper per **XAUUSD su M1**. Lo scalping sull'oro in M1 non fallisce per mancanza di segnali:
+Scalper per **XAUUSD su M1 e M5**. Lo scalping sull'oro non fallisce per mancanza di segnali:
 fallisce per i **costi** e per il **rumore**. L'EA e' costruito attorno a questi due problemi.
 
 File sorgente: `MQL4/Experts/GoldScalperM1.mq4`
 
 ## Come ragiona
 
-### 1. La direzione non si legge su M1
-Su M1 la direzione e' rumore, quindi si legge su `TrendTimeframe` (default M15): EMA 21 sopra o
-sotto EMA 50, prezzo dalla parte giusta, pendenza della EMA lenta misurata su `BiasSlopeBars`
-barre e, se `UseADXFilter` e' attivo, ADX sopra `ADX_Min`. Senza direzione chiara non si opera.
+### 1. La direzione non si legge sul timeframe di ingresso
+Su M1 la direzione e' rumore, quindi si legge su `TrendTimeframe`: EMA 21 sopra o sotto EMA 50,
+prezzo dalla parte giusta, pendenza della EMA lenta e, se `UseADXFilter` e' attivo, ADX sopra la
+soglia. Senza direzione chiara non si opera.
 
 ### 2. Si entra sul ritracciamento, non sulla rottura
-Sul timeframe di ingresso l'EA cerca un **pullback sulla EMA veloce** entro `PullbackBars` barre,
-seguito dalla ripartenza nella direzione del bias. La barra di innesco deve:
+L'EA cerca un **pullback sulla EMA veloce** entro `PullbackBars` barre, seguito dalla ripartenza
+nella direzione del bias. La barra di innesco deve chiudere oltre la EMA veloce dalla parte
+giusta, avere un corpo di almeno `MinBodyATR * ATR`, rompere il massimo/minimo precedente
+(`RequireBreakout`) e avere l'RSI oltre la soglia di momentum ma **sotto** `RSI_MaxEntry`, per non
+comprare un movimento gia' esteso.
 
-- chiudere oltre la EMA veloce, dalla parte del bias;
-- avere un corpo di almeno `MinBodyATR * ATR` (niente doji);
-- rompere il massimo/minimo della barra precedente (`RequireBreakout`);
-- avere l'RSI oltre la soglia di momentum ma **sotto** `RSI_MaxEntry`, per non comprare
-  un movimento gia' esteso.
+### 3. Volatilita': il confronto e' con l'abitudine dello strumento, non con un numero fisso
+Il filtro principale e' **relativo**: `ATR corrente / media dell'ATR su ATR_AvgPeriod barre` deve
+stare fra `MinATRRatio` e `MaxATRRatio`.
 
-### 3. Il filtro che conta davvero: i costi
-Su M1 il take profit e' piccolo, lo spread no. Prima di ogni ordine `BuildStopDistances()`
+Questo e' il punto piu' importante del filtro. Una soglia assoluta in pips presuppone di sapere
+quanto vale l'ATR "normale" dello strumento, ma quel valore dipende dal livello del prezzo
+dell'oro, dal broker e dal periodo storico: **lasciata fissa, blocca l'operativita' per giorni
+interi anche in assenza di qualunque notizia.** Il rapporto rispetto alla media, invece, si
+ricalibra da solo su qualunque simbolo e qualunque fase di mercato.
+
+`MinATRPips` e `MaxATRPips` restano disponibili come rete di sicurezza assoluta ma sono a **0
+(disattivi)** di default. La guardia anti-spike `SpikeATRFactor` (range della barra oltre N volte
+l'ATR) e' anch'essa relativa ed e' lo strumento giusto contro le candele da notizia.
+
+### 4. Il filtro che decide: i costi
+Il take profit di uno scalp e' piccolo, lo spread no. Prima di ogni ordine `BuildStopDistances()`
 esegue quattro verifiche e, se una fallisce, **scarta il trade** invece di eseguirlo degradato:
 
-1. **Vincolo broker contro volatilita'** — se `STOPLEVEL + spread` supera `MaxStopLevelATR`
-   volte l'ATR, su quel broker l'M1 non e' sostenibile in quel momento.
-2. **Allargamento massimo dello stop** — oltre `MaxStopWideningFactor` il trade perde la
-   relazione con la volatilita' che lo ha generato.
+1. **Vincolo broker contro volatilita'** — se `STOPLEVEL + spread` supera `MaxStopLevelATR` volte
+   l'ATR, su quel broker quel timeframe non e' sostenibile in quel momento.
+2. **Allargamento massimo dello stop** — oltre `MaxStopWideningFactor` il trade perde la relazione
+   con la volatilita' che lo ha generato.
 3. **Copertura dei costi** — il TP deve valere almeno `MinTPCostRatio` volte spread + commissione.
 4. **Rischio/rendimento residuo** — dopo ogni aggiustamento il R:R deve restare sopra `MinRiskReward`.
 
-A questi si aggiungono il filtro di spread (assoluto **e** in rapporto all'ATR) e la banda di
-volatilita' `MinATRPips` / `MaxATRPips`, che tiene fuori sia il mercato morto sia le candele da
-notizia, insieme alla guardia anti-spike `SpikeATRFactor`.
+### 5. Uscita rapida
+La gestione lavora in **multipli di R** (R = distanza dello stop iniziale): parziale del
+`PartialPercent` a `PartialAtR`, break-even a `BreakEvenR`, trailing su ATR da `TrailStartR`,
+uscita a tempo dopo `MaxTradeMinutes`. Lo stop non arretra mai e il freeze level e' rispettato.
 
-### 4. Uscita rapida
-Uno scalp M1 che dura un'ora non e' piu' uno scalp. La gestione lavora in **multipli di R**
-(R = distanza dello stop iniziale):
-
-- **parziale** del `PartialPercent` del volume a `PartialAtR` (default 50% a 1R);
-- **break-even** a `BreakEvenR` con `BreakEvenLockPips` bloccati;
-- **trailing** su ATR da `TrailStartR` in poi, con passo minimo `TrailStepPips`;
-- **uscita a tempo** dopo `MaxTradeMinutes` (default 45).
-
-Lo stop non arretra mai e il freeze level del broker viene sempre rispettato.
 Poiche' MT4 assegna un **nuovo ticket** alla parte residua dopo una parziale, l'EA tiene un
 registro interno indicizzato sull'**ora di apertura**, che la parziale non modifica: e' cosi' che
-1R resta noto per tutta la vita della posizione, anche dopo il cambio di ticket.
+1R resta noto per tutta la vita della posizione.
 
-### 5. Protezioni
-`MaxTradesPerDay`, `MaxTradesPerHour`, stop giornaliero `MaxDailyLossPercent`, target giornaliero
-`DailyProfitTargetPct` (raggiunto il quale si smette: fa parte del metodo), pausa di
-`CooldownMinutes` dopo `MaxConsecutiveLosses` perdite consecutive, attesa di `CooldownBars` barre
-dopo ogni operazione, finestra di rollover esclusa e chiusura del venerdi'.
-
-I limiti giornalieri contano gli **ingressi**, non i record di cronologia: una chiusura parziale
+### 6. Protezioni
+`MaxTradesPerDay`, `MaxTradesPerHour`, stop giornaliero, target giornaliero, pausa dopo N perdite
+consecutive, attesa in barre dopo ogni operazione, finestra di rollover esclusa, chiusura del
+venerdi'. I limiti contano gli **ingressi**, non i record di cronologia: una chiusura parziale
 lascia due operazioni con la stessa ora di apertura e senza questa distinzione un solo ingresso
 consumerebbe due posti.
 
+## Profilo di aggressivita'
+
+`AggressionProfile` agisce insieme su tre dimensioni: quanto e' facile che un setup sia
+accettato, quante operazioni sono ammesse e quanto si rischia su ognuna.
+
+| | Conservativo | Standard | Aggressivo | Molto aggressivo |
+|---|---|---|---|---|
+| Corpo minimo della barra | x1.40 | x1.00 | x0.50 | x0.25 |
+| ADX minimo | x1.30 | x1.00 | x0.60 | x0.30 |
+| Banda ATR | piu' stretta | base | +40% | +90% |
+| Barre utili al pullback | base | base | +2 | +3 |
+| RSI massimo di ingresso | -5 | base | +8 | +12 |
+| Rottura obbligatoria | si | input | no | no |
+| Pendenza EMA obbligatoria | si | si | no | no |
+| Trade al giorno e all'ora | x0.60 | x1.00 | x2.00 | x3.00 |
+| Attesa fra operazioni | x1.50 | x1.00 | x0.35 | nessuna |
+| Sessioni | -15 min | base | +45 min | +120 min |
+| **Rischio per operazione** | **x0.70** | **x1.00** | **x1.50** | **x2.00** |
+
+Il default e' **Aggressivo**. `Personalizzato` disattiva il profilo e usa gli input come sono.
+
+**Restano dei pavimenti che nessun profilo puo' superare**: copertura dei costi mai sotto 1.20x,
+R:R mai sotto 1.00, spread/ATR mai oltre 0.60, rischio mai oltre il 10%. Sono cio' che distingue
+uno scalper da un regalo di spread al broker: allargare quei limiti non rende l'EA piu'
+aggressivo, lo rende perdente in modo matematico.
+
+Aggressivita' e drawdown crescono insieme. Il profilo `Molto aggressivo` **raddoppia il rischio
+per operazione** rispetto a `RiskPercent`: verificalo in backtest e in demo prima del reale.
+
+## Adattamento al timeframe
+
+Con `AutoAdaptToTimeframe` attivo (default) i parametri seguono il timeframe scelto:
+
+| Grandezza | Legge di scala | Da M1 a M5 |
+|---|---|---|
+| Soglie in pips (stop minimo, break-even, passo del trailing) | radice del tempo | x2.24 |
+| Uscita a tempo | lineare nella durata della barra | x5 |
+| Parametri misurati in barre (EMA, RSI, pullback, attese) | invariati | invariati |
+| Timeframe direzionale | alzato se sotto 5 volte quello di ingresso | M15 diventa H1 |
+
+Le escursioni di prezzo non crescono di 5 volte passando da M1 a M5, ma di circa la radice di 5:
+e' la legge di scala corretta per una grandezza di volatilita'. Il filtro relativo dell'ATR non
+ha bisogno di alcun adattamento, perche' e' gia' un rapporto.
+
 ## Dashboard
 
-Pannello ad oggetti, ancorabile in alto a sinistra o a destra (`PanelCorner`), aggiornato ogni
-secondo anche in assenza di tick (timer). Contiene:
+Pannello ad oggetti, ancorabile a sinistra o a destra, aggiornato ogni secondo anche in assenza
+di tick. Contiene intestazione con badge di stato e tre pulsanti (**II** sospendi ingressi,
+**X** chiudi tutto, **-** riduci), tre riquadri KPI, **assetto operativo** (profilo attivo,
+adattamento applicato, rischio e limiti effettivi), mercato con **ATR e rapporto ATR/media** e
+barra dello spread, **checklist dei filtri con semaforo**, piano della prossima operazione,
+posizione aperta con barra da SL a TP, riepilogo della giornata, storico e **ultimo filtro
+attivato**.
 
-- **intestazione** con badge di stato (`OPERATIVO`, `IN POSIZIONE`, `IN PAUSA`, `COOLDOWN`,
-  `STOP GIORNO`, `AUTOTRADING OFF`) e tre pulsanti: **II** sospende i nuovi ingressi,
-  **X** chiude tutte le posizioni dell'EA, **-** riduce il pannello;
-- **tre riquadri KPI**: equity, risultato di oggi, risultato totale dell'EA;
-- **mercato**: direzione M15, ADX, ATR, **barra dello spread** rispetto al limite operativo
-  effettivo (il piu' stringente fra soglia assoluta e soglia relativa all'ATR), countdown della
-  barra M1;
-- **checklist dei filtri** con semaforo: sessione, spread, volatilita', direzione, setup M1,
-  copertura dei costi, limiti e attese. Si vede a colpo d'occhio **cosa manca** per entrare;
-- **prossima operazione**: SL, TP, R:R e volume che verrebbero usati adesso;
-- **posizione aperta**: direzione, volume, ingresso, durata, SL/TP, P/L e una barra che mostra
-  l'avanzamento da SL (-1R) a TP, con lo stato della parziale;
-- **giornata**: barra della perdita giornaliera consumata, barra del target, trade usati su
-  limite giornaliero e orario, perdite consecutive;
-- **storico EA**: operazioni chiuse, win rate, profit factor, drawdown dal picco;
-- **ultimo filtro attivato**: il motivo per cui l'ultimo ingresso non e' avvenuto.
-
-Il conteggio di "operazioni chiuse" e il win rate seguono la convenzione del report di MT4:
-una chiusura parziale e' un'operazione a se'.
-
-## Parametri di partenza (gia' impostati nel file)
-
-| Parametro | Valore | Note |
-|---|---|---|
-| `EntryTimeframe` / `TrendTimeframe` | M1 / M15 | |
-| `RiskPercent` | 0.5 | basso per frequenza alta |
-| `SL_ATR` / `MinSLPips` | 1.20 / 8.0 | stop tecnico con pavimento |
-| `RewardRatio` | 1.50 | TP = 1.5 volte lo stop |
-| `MaxSpreadPips` / `MaxSpreadToATR` | 3.0 / 0.25 | il secondo e' quello che conta |
-| `MinATRPips` / `MaxATRPips` | 2.0 / 30.0 | banda di volatilita' operativa |
-| `MinTPCostRatio` | 2.50 | il TP deve valere 2.5 volte i costi |
-| `MaxTradesPerDay` / `PerHour` | 15 / 4 | |
-| `MaxDailyLossPercent` / `DailyProfitTargetPct` | 2.5 / 3.0 | |
-| `MaxConsecutiveLosses` / `CooldownMinutes` | 3 / 30 | |
-| Sessioni | 08:00-11:30 e 14:30-17:30 | **ora del server** |
-| `MaxTradeMinutes` | 45 | uscita a tempo |
-| `CommissionPerLot` | 0.0 | **da impostare** |
+La dashboard mostra sempre i valori **effettivi** dopo profilo e adattamento, non gli input.
 
 ## Note operative
 
-- **`CommissionPerLot` va impostato.** Su M1 la commissione incide sul risultato piu' della
-  strategia: entra sia nel calcolo del lotto sia nella verifica di copertura del TP.
-- **Le ore di sessione sono ora del server**, non locale. I default assumono un broker su
-  GMT+2/GMT+3: verificali prima di operare.
-- **Guarda la barra dello spread.** Se sta stabilmente oltre il 75% del limite, quel broker non
-  e' adatto allo scalping M1 sull'oro, e nessun parametro puo' compensarlo.
-- Se il volume calcolato e' inferiore al doppio del lotto minimo, la chiusura parziale non e'
-  eseguibile e la posizione uscira' intera al TP: l'EA lo segnala nel journal.
-- Il backtest M1 e' attendibile solo con **dati tick reali** e modello "Every tick": con i dati
-  M1 interpolati di MT4 i risultati di uno scalper non significano nulla.
-- I default sono punti di partenza ragionevoli, non parametri ottimizzati. Backtest, poi
-  walk-forward, poi demo. Sotto un centinaio di operazioni il risultato non e' interpretabile.
+- **`CommissionPerLot` va impostato** con il valore reale round-turn del tuo conto: entra sia nel
+  calcolo del lotto sia nella verifica di copertura del TP.
+- **Dopo un aggiornamento del file, riporta i parametri ai valori di default.** MT4 conserva per
+  ogni grafico gli input usati in precedenza: se resta un `MaxATRPips` vecchio, il filtro
+  assoluto continua a bloccare tutto. In caso di dubbio usa `Ripristina` nella finestra
+  dell'EA. All'avvio l'EA scrive nel journal una **diagnostica della volatilita'** e avvisa
+  esplicitamente se una soglia impostata sta impedendo ogni ingresso.
+- **Le ore di sessione sono ora del server**, non locale.
+- **Guarda la barra dello spread.** Se sta stabilmente oltre il 75% del limite, quel broker non e'
+  adatto allo scalping su questo simbolo, e nessun parametro puo' compensarlo.
+- Il backtest su timeframe rapidi e' attendibile solo con **dati tick reali** e modello
+  "Every tick".
+- I default sono punti di partenza ragionevoli, non parametri ottimizzati.
 
 ---
 
