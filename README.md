@@ -1,3 +1,14 @@
+# Sistemi di trading per MetaTrader 4
+
+Questo repository contiene due Expert Advisor indipendenti, entrambi tarati su XAUUSD.
+
+| Sistema | Logica | Documentazione |
+|---|---|---|
+| **Adaptive Regime EA** | Classifica il regime di mercato (trend / range) su un timeframe superiore e applica la strategia coerente. Dashboard integrata nel grafico. | questo file |
+| **EMA Bounce & Order Block EA** | Trend continuation su XAUUSD M5: rimbalzo dinamico sulla banda EMA in confluenza con order block. **Dashboard esterna** su indicatore separato. | [EMABounceOB.md](EMABounceOB.md) |
+
+---
+
 # Adaptive Regime EA v2.00 (MQL4 / MetaTrader 4)
 
 Expert Advisor per MetaTrader 4 costruito attorno a tre principi: **adattamento al regime di
