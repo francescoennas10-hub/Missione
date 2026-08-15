@@ -156,6 +156,8 @@ enum ENUM_SYMBOL_CLASS
 #define REJ_SCORE       18
 #define REJ_LOSSSTREAK  19
 #define REJ_NOBIAS      20
+#define REJ_ENTRY_FAR   21
+#define REJ_COUNT       22
 
 //+------------------------------------------------------------------+
 //| INPUT: Timeframe                                                 |
@@ -204,6 +206,7 @@ input int              OB_ScanBars       = 300;    // Barre analizzate alla part
 input int              OB_MaxAgeBars     = 150;    // Eta' massima di un order block (barre)
 input int              OB_MaxTouches     = 2;      // Tocchi oltre i quali la zona e' consumata
 input double           OB_ProximityATR   = 0.30;   // Tolleranza di contatto con la zona (in ATR)
+input double           OB_MaxHeightATR   = 1.50;   // Altezza massima della zona (in ATR, 0 = nessun limite)
 input bool             OB_MitigateOnClose= true;   // Invalidazione alla chiusura oltre la zona
 input bool             RequireOrderBlock = true;   // L'order block e' obbligatorio
 
@@ -214,6 +217,8 @@ input string           s_entry           = "===== ENTRY =====";
 input ENUM_ENTRY_MODE  EntryMode         = ENTRY_CONFLUENCE; // Criterio di ingresso
 input int              MinConfluenceScore= 60;     // Punteggio minimo di confluenza (0-100)
 input ENUM_EXEC_MODE   ExecutionMode     = EXEC_MARKET; // Esecuzione a mercato o con limite
+input double           MaxEntryDistanceATR = 1.20; // Distanza massima ingresso-zona (in ATR, 0 = off)
+input bool             AutoLimitWhenFar  = true;   // Se l'ingresso e' lontano, piazza un limite nella zona
 input double           LimitEntryDepth   = 0.50;   // Limite: profondita' nella zona (0=bordo, 1=fondo)
 input int              PendingExpiryBars = 6;      // Barre di validita' dell'ordine limite
 input bool             UseMomentumFilter = true;   // Filtro di momentum (RSI)
@@ -228,7 +233,7 @@ input string           s_stops           = "===== STOP & TARGET =====";
 input int              ATR_Period        = 14;     // Periodo ATR
 input double           SL_BufferATR      = 0.35;   // Margine dello stop oltre la zona (in ATR)
 input double           MinSL_ATR         = 0.50;   // Stop minimo consentito (in ATR)
-input double           MaxSL_ATR         = 2.50;   // Stop massimo consentito (in ATR)
+input double           MaxSL_ATR         = 3.00;   // Stop massimo consentito (in ATR)
 input ENUM_TP_MODE     TakeProfitMode    = TP_RMULTIPLE; // Criterio del take profit
 input double           TP_RMultiple      = 2.00;   // Take profit in multipli del rischio
 input int              TP_StructureBars  = 60;     // Barre in cui cercare il target strutturale
@@ -381,6 +386,11 @@ int      g_state          = ST_INIT;
 int      g_reject         = REJ_NONE;
 string   g_rejectText     = "-";
 
+//--- Statistica degli scarti: in backtest e' l'unico modo per sapere
+//    QUALE filtro sta fermando l'EA, invece di leggere migliaia di righe.
+int      g_rejStat[REJ_COUNT];
+int      g_evalCount      = 0;
+
 //--- Order block
 OrderBlockInfo g_ob[MAX_OB * 2];
 
@@ -488,6 +498,10 @@ void OnDeinit(const int reason)
   {
    Print("[", TradeComment, "] Deinit, motivo=", reason, " (", DeinitReasonText(reason), ")");
 
+   //--- In backtest questo riepilogo e' la prima cosa da leggere quando
+   //    l'EA non ha aperto niente: dice quale filtro ha fermato cosa.
+   PrintRejectStats();
+
    DeleteVisuals();
 
    //--- La telemetria sopravvive a ricompilazioni e cambi di parametro:
@@ -551,11 +565,14 @@ void OnTick()
    if(NewBarOnly && !newBar)
       return;
 
-   //--- 8) Pulizia degli ordini pendenti scaduti
-   if(ExecutionMode == EXEC_LIMIT)
+   //--- 8) Pulizia degli ordini pendenti scaduti. Con AutoLimitWhenFar
+   //       un pendente puo' esistere anche in modalita' a mercato: se non
+   //       lo si ripulisce resta armato a bias gia' invertito.
+   if(ExecutionMode == EXEC_LIMIT || AutoLimitWhenFar)
       CleanupPendingOrders();
 
    //--- 9) Filtri, dal piu' economico al piu' costoso
+   g_evalCount++;
    if(!PassContextFilters())
       return;
 
@@ -566,9 +583,24 @@ void OnTick()
 
    //--- 11) Esecuzione
    if(ExecutionMode == EXEC_LIMIT)
+     {
       PlaceLimitOrder(signal);
-   else
-      OpenMarketPosition(signal);
+      return;
+     }
+
+   if(OpenMarketPosition(signal))
+      return;
+
+   //--- Il setup era valido ma la conferma ha gia' portato il prezzo
+   //    lontano dalla zona: invece di buttarlo, si aspetta il rientro
+   //    con un limite. E' la stessa idea, eseguita al prezzo giusto.
+   if(AutoLimitWhenFar && g_reject == REJ_ENTRY_FAR && g_activeOB >= 0)
+     {
+      if(VerboseLog)
+         Print("[", TradeComment, "] Ingresso a mercato troppo lontano: ",
+               "ripiego su ordine limite nella zona.");
+      PlaceLimitOrder(signal);
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -918,6 +950,13 @@ bool TestOrderBlockAt(int k, int dir, double atr, double &obHi, double &obLo,
       return(false);
 
    if(obHi <= obLo)
+      return(false);
+
+   //--- Una zona alta quanto l'impulso non e' un order block: e' un range.
+   //    Lo stop nasce oltre il suo estremo, quindi una zona sproporzionata
+   //    produce sempre uno stop che sfonda MaxSL_ATR e il setup viene
+   //    scartato all'ultimo passo. Meglio non registrarla affatto.
+   if(OB_MaxHeightATR > 0.0 && (obHi - obLo) > atr * OB_MaxHeightATR)
       return(false);
 
    impulseATR = move / atr;
@@ -1487,6 +1526,45 @@ double CommissionPriceEquivalent()
   }
 
 //+------------------------------------------------------------------+
+//| Quanto l'ingresso e' gia' scappato dalla zona che lo ha generato. |
+//| Lo stop nasce oltre l'estremo della struttura: se la candela di   |
+//| conferma e' lunga, il prezzo a cui si entra e' molto piu' in alto |
+//| del bordo della zona e lo stop paga due volte, la zona e la       |
+//| rincorsa. Misurarlo a parte separa "setup sbagliato" da           |
+//| "setup giusto, ingresso tardivo", che si cura con un limite.      |
+//+------------------------------------------------------------------+
+double EntryChaseDistance(int dir, double entryPrice, double atr)
+  {
+   double edge = 0.0;
+   bool   have = false;
+
+   //--- Bordo prossimale dell'order block attivo
+   if(g_activeOB >= 0 && g_ob[g_activeOB].used && !g_ob[g_activeOB].dead)
+     {
+      edge = (dir > 0) ? g_ob[g_activeOB].hi : g_ob[g_activeOB].lo;
+      have = true;
+     }
+
+   //--- In mancanza di order block vale il bordo della banda EMA
+   if(!have)
+     {
+      double zLo, zHi;
+      ComputeZone(1, atr, zLo, zHi);
+      if(zHi > zLo)
+        {
+         edge = (dir > 0) ? zHi : zLo;
+         have = true;
+        }
+     }
+
+   if(!have)
+      return(0.0);
+
+   double chase = (dir > 0) ? (entryPrice - edge) : (edge - entryPrice);
+   return(MathMax(chase, 0.0));
+  }
+
+//+------------------------------------------------------------------+
 //| COSTRUZIONE DI STOP E TARGET                                     |
 //| Lo stop nasce dalla struttura (order block / ritracciamento),    |
 //| non da un multiplo fisso. Poi viene confrontato con i vincoli    |
@@ -1514,6 +1592,22 @@ bool BuildStops(int dir, double entryPrice, double atr,
                           minDist / g_pip, MaxStopLevelATR * 100.0, atr / g_pip);
       SetReject(REJ_STOPLEVEL, note);
       return(false);
+     }
+
+   //--- CONTROLLO 1-bis: l'ingresso e' ancora vicino alla zona?
+   //    Va misurato prima dello stop, altrimenti una conferma lunga si
+   //    presenta come "stop troppo largo" e si finisce ad allargare
+   //    MaxSL_ATR quando il problema e' che si sta entrando tardi.
+   if(MaxEntryDistanceATR > 0.0)
+     {
+      double chase = EntryChaseDistance(dir, entryPrice, atr);
+      if(chase > atr * MaxEntryDistanceATR)
+        {
+         note = StringFormat("ingresso a %.2f ATR dalla zona, oltre il massimo %.2f",
+                             chase / atr, MaxEntryDistanceATR);
+         SetReject(REJ_ENTRY_FAR, note);
+         return(false);
+        }
      }
 
    //--- Stop tecnico: oltre la zona, con margine in ATR
@@ -2801,6 +2895,11 @@ double FloatingProfit()
 //+------------------------------------------------------------------+
 void SetReject(int code, string reason)
   {
+   //--- Il conteggio precede la deduplica: due barre scartate per lo
+   //    stesso motivo sono due occasioni perse, non una.
+   if(code > REJ_NONE && code < REJ_COUNT)
+      g_rejStat[code]++;
+
    if(code == g_reject && reason == g_rejectText)
       return;
 
@@ -2809,6 +2908,85 @@ void SetReject(int code, string reason)
 
    if(VerboseLog && code != REJ_NONE)
       Print("[", TradeComment, "] Ingresso non eseguito: ", reason);
+  }
+
+//+------------------------------------------------------------------+
+//| Nome leggibile di un motivo di scarto                            |
+//+------------------------------------------------------------------+
+string RejectName(int code)
+  {
+   switch(code)
+     {
+      case REJ_SPREAD:       return("spread assoluto");
+      case REJ_SPREAD_ATR:   return("spread/ATR");
+      case REJ_SESSION:      return("fuori sessione");
+      case REJ_DAILY_TRADES: return("limite trade giornalieri");
+      case REJ_DAILY_LOSS:   return("stop giornaliero");
+      case REJ_DAILY_TARGET: return("target giornaliero");
+      case REJ_COOLDOWN:     return("cooldown");
+      case REJ_MAXPOS:       return("posizioni gia' al limite");
+      case REJ_STOPLEVEL:    return("stop level del broker");
+      case REJ_SL_WIDE:      return("stop troppo largo");
+      case REJ_SL_TIGHT:     return("stop troppo stretto");
+      case REJ_RR:           return("rischio/rendimento");
+      case REJ_LOTS:         return("volume non calcolabile");
+      case REJ_SEND:         return("invio ordine fallito");
+      case REJ_BARS:         return("storico insufficiente");
+      case REJ_NOOB:         return("order block assente");
+      case REJ_NOBOUNCE:     return("rimbalzo EMA assente");
+      case REJ_SCORE:        return("confluenza/momentum");
+      case REJ_LOSSSTREAK:   return("pausa perdite consecutive");
+      case REJ_NOBIAS:       return("bias assente");
+      case REJ_ENTRY_FAR:    return("ingresso lontano dalla zona");
+     }
+   return("altro");
+  }
+
+//+------------------------------------------------------------------+
+//| Riepilogo degli scarti, ordinato per frequenza                   |
+//| Il filtro in cima e' quello da guardare per primo: e' li' che si  |
+//| decide se l'EA e' selettivo o semplicemente bloccato.            |
+//+------------------------------------------------------------------+
+void PrintRejectStats()
+  {
+   int total = 0;
+   for(int i = 1; i < REJ_COUNT; i++)
+      total += g_rejStat[i];
+
+   Print("[", TradeComment, "] ===== RIEPILOGO SCARTI =====");
+
+   if(total <= 0)
+     {
+      Print("[", TradeComment, "] Nessuno scarto registrato.");
+      return;
+     }
+
+   //--- Ordinamento decrescente per selezione: REJ_COUNT e' piccolo
+   bool done[REJ_COUNT];
+   for(int i = 0; i < REJ_COUNT; i++)
+      done[i] = false;
+
+   for(int rank = 0; rank < REJ_COUNT - 1; rank++)
+     {
+      int best = -1;
+      for(int i = 1; i < REJ_COUNT; i++)
+        {
+         if(done[i] || g_rejStat[i] <= 0)
+            continue;
+         if(best < 0 || g_rejStat[i] > g_rejStat[best])
+            best = i;
+        }
+      if(best < 0)
+         break;
+
+      done[best] = true;
+      Print("[", TradeComment, "] ", RejectName(best), ": ", g_rejStat[best],
+            " (", DoubleToString(100.0 * g_rejStat[best] / total, 1), "%)");
+     }
+
+   Print("[", TradeComment, "] Totale scarti: ", total,
+         " | valutazioni: ", g_evalCount,
+         " | trade chiusi: ", (g_statWins + g_statLosses));
   }
 
 //+------------------------------------------------------------------+

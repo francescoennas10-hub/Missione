@@ -108,6 +108,26 @@ Il trailing ha quattro modalita': `TRAIL_ATR` (default), `TRAIL_EMA` (segue la E
   in barre. Riempimento incerto, ingresso migliore. L'ordine viene rimosso se scade o se il bias
   non e' piu' coerente.
 
+### La rincorsa: perche' un setup valido puo' non diventare un trade
+
+Lo stop nasce oltre l'estremo della struttura, ma l'ingresso a mercato avviene alla **chiusura**
+della candela di conferma. Se quella candela e' lunga — su XAUUSD M5 in fase volatile puo' valere
+2-3 ATR da sola — il prezzo di ingresso e' gia' molto sopra il bordo della zona, e lo stop paga due
+volte: l'ampiezza della zona **e** la rincorsa. Il risultato e' uno stop che sfonda `MaxSL_ATR` e
+un setto perfettamente valido scartato all'ultimo passo.
+
+`MaxEntryDistanceATR` (default 1.20) misura quella rincorsa **prima** di costruire lo stop, cosi'
+il journal dice `ingresso a 3.20 ATR dalla zona` invece di `stop tecnico troppo largo`: sono due
+diagnosi diverse e portano a due correzioni diverse.
+
+Con `AutoLimitWhenFar = true` (default) il setup non viene buttato: l'EA piazza un **limite dentro
+la zona** e aspetta il rientro. Stessa idea, eseguita al prezzo giusto. Se il prezzo non torna,
+il pendente scade dopo `PendingExpiryBars` barre senza aver rischiato nulla.
+
+`OB_MaxHeightATR` (default 1.50) scarta a monte le zone piu' alte di N ATR: un "order block" alto
+quanto l'impulso che lo ha generato non e' una zona, e' un range, e produce sistematicamente stop
+inutilizzabili.
+
 Gestiti: retry con backoff, errore 130 (apertura senza stop e modifica immediata), errore 147
 (scadenza rifiutata dal broker, ritentata senza), broker ECN con `TwoStepStops`, freeze level.
 In MT4 una chiusura parziale genera un **nuovo ticket**: l'EA traccia le posizioni per
@@ -167,8 +187,11 @@ I default del file sono gia' questi.
 | `ZoneBufferATR` | 0.20 | tolleranza del tocco |
 | `OB_MinImpulseATR` | 1.20 | soglia dell'impulso |
 | `OB_RequireBOS` | true | niente BOS, niente order block |
+| `OB_MaxHeightATR` | 1.50 | oltre questa altezza non e' una zona, e' un range |
 | `MinConfluenceScore` | 60 | con ENTRY_CONFLUENCE equivale a rimbalzo + OB |
-| `SL_BufferATR` / `MinSL_ATR` / `MaxSL_ATR` | 0.35 / 0.50 / 2.50 | stop tecnico e suoi limiti |
+| `MaxEntryDistanceATR` | 1.20 | rincorsa massima tollerata dopo la conferma |
+| `AutoLimitWhenFar` | true | se la conferma e' scappata, limite nella zona |
+| `SL_BufferATR` / `MinSL_ATR` / `MaxSL_ATR` | 0.35 / 0.50 / 3.00 | stop tecnico e suoi limiti |
 | `TP_RMultiple` / `MinRiskReward` | 2.00 / 1.50 | |
 | `RiskPercent` | 1.0 | |
 | `MaxSpreadPips` / `MaxSpreadToATR` | 3.5 / 0.15 | 1 pip oro = 0.10 USD |
@@ -188,6 +211,46 @@ I default del file sono gia' questi.
   broker, e nessuna taratura dei parametri lo rende sostenibile.
 - Se l'EA non entra mai, guarda **Ultimo blocco** sulla dashboard prima di toccare i parametri:
   quasi sempre il motivo e' uno solo e specifico.
+
+## Se l'EA non apre nessun trade
+
+L'EA e' una catena di condizioni in AND: bias, rimbalzo, order block, punteggio, momentum, stop
+sostenibile, spread, sessione, limiti. Ne basta una per non operare, e leggere il journal riga per
+riga non dice **quale pesa di piu'**.
+
+Alla rimozione dell'EA — e alla fine di ogni backtest — il journal stampa un riepilogo ordinato
+per frequenza:
+
+```
+[EBOB] ===== RIEPILOGO SCARTI =====
+[EBOB] rimbalzo EMA assente: 812 (58.3%)
+[EBOB] order block assente: 344 (24.7%)
+[EBOB] ingresso lontano dalla zona: 121 (8.7%)
+[EBOB] stop troppo largo: 63 (4.5%)
+...
+[EBOB] Totale scarti: 1393 | valutazioni: 1402 | trade chiusi: 9
+```
+
+La voce in cima e' quella da guardare per prima. Come leggerla:
+
+| Voce dominante | Cosa significa | Dove intervenire |
+|---|---|---|
+| `rimbalzo EMA assente` | la banda non viene toccata, o il rifiuto non e' misurabile | alza `ZoneBufferATR` (0.20 -> 0.30), alza `BounceLookback`, abbassa `MinWickRatio`/`MinBodyRatio` |
+| `order block assente` | nessuna zona valida dove arriva il ritracciamento | abbassa `OB_MinImpulseATR`, alza `OB_MaxAgeBars`/`OB_ProximityATR`, oppure `OB_RequireBOS = false` |
+| `ingresso lontano dalla zona` | i setup ci sono, la conferma e' troppo estesa | lascia `AutoLimitWhenFar = true`, oppure passa direttamente a `EXEC_LIMIT` |
+| `stop troppo largo` | la struttura e' larga rispetto all'ATR | alza `MaxSL_ATR`, o abbassa `OB_MaxHeightATR` per rifiutare le zone sproporzionate |
+| `bias assente` | il timeframe superiore non e' direzionale | abbassa `Bias_MinSlopeATR`/`Bias_MinSepATR`, o usa `BiasTimeframe = PERIOD_M15` invece di H1 |
+| `spread/ATR` o `spread assoluto` | il broker e' troppo caro per M5 | nessuna taratura lo risolve: cambia timeframe o broker |
+| `stop level del broker` | `STOPLEVEL` incompatibile con la volatilita' | conto ECN, o timeframe superiore |
+
+**Un ordine di lavoro che funziona:** parti allentando *un solo* requisito alla volta e rigira il
+backtest. Se vuoi prima vedere l'EA operare per verificare che l'esecuzione sia sana, metti
+`RequireOrderBlock = false` e `MinConfluenceScore = 40`: entra molto piu' spesso e molto peggio,
+ma dimostra che la catena esecutiva funziona. Poi rimetti i requisiti uno per uno.
+
+**Nota**: `valutazioni` conta le barre effettivamente valutate. Se e' vicino a zero, il problema
+non e' nei filtri ma a monte — `NewBarOnly` con storico insufficiente, AutoTrading disattivato,
+simbolo o timeframe sbagliato.
 - Nel tester la dashboard funziona solo in **modalita' visiva**, applicandola al grafico del
   tester. I default sono punti di partenza ragionevoli, non parametri ottimizzati: backtest su
   "Every tick" con dati tick di qualita', poi walk-forward, poi demo. Sotto un centinaio di trade
