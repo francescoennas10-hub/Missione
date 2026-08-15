@@ -1995,13 +1995,28 @@ void CloseAllOwnPositions(string reason)
       if(OrderMagicNumber() != MagicNumber || OrderSymbol() != Symbol())
          continue;
 
+      int ticket = OrderTicket();
+
       if(OrderType() == OP_BUY || OrderType() == OP_SELL)
         {
-         Print("[", TradeComment, "] Chiusura ticket ", OrderTicket(), ": ", reason);
-         ClosePositionByTicket(OrderTicket());
+         Print("[", TradeComment, "] Chiusura ticket ", ticket, ": ", reason);
+         if(!ClosePositionByTicket(ticket))
+            Print("[", TradeComment, "] Chiusura del ticket ", ticket, " non riuscita.");
         }
       else
-         OrderDelete(OrderTicket(), clrGray);
+        {
+         //--- Ordine pendente: va rimosso, e se non si rimuove va detto.
+         //    Una chiusura di fine sessione che lascia indietro un limite
+         //    riaprirebbe la posizione a mercato chiuso il giorno dopo.
+         ResetLastError();
+         if(!OrderDelete(ticket, clrGray))
+           {
+            //--- GetLastError() azzera il codice: va letto una volta sola
+            int err = GetLastError();
+            Print("[", TradeComment, "] OrderDelete fallito su ", ticket,
+                  ", errore ", err, ": ", ErrorDescription(err));
+           }
+        }
      }
   }
 
@@ -3082,7 +3097,10 @@ void DrawVisuals()
       datetime left = TmE((int)MathMin(iBars(Symbol(), g_tf) - 1, 60));
 
       if(ObjectFind(0, zname) < 0)
-         ObjectCreate(0, zname, OBJ_RECTANGLE, 0, left, g_zoneHi, rightEdge, g_zoneLo);
+        {
+         if(!ObjectCreate(0, zname, OBJ_RECTANGLE, 0, left, g_zoneHi, rightEdge, g_zoneLo))
+            return;
+        }
       else
         {
          ObjectSetInteger(0, zname, OBJPROP_TIME1,  left);
