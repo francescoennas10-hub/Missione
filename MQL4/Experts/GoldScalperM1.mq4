@@ -2006,9 +2006,16 @@ void UpdateTradeStats()
    g_tradesToday     = 0;
    g_tradesThisHour  = 0;
 
-   //--- Ultime operazioni chiuse, per la sequenza di perdite consecutive
+   //--- Ultime operazioni chiuse, per la sequenza di perdite consecutive.
+   //    Gli array locali a dimensione fissa non sono azzerati dal compilatore.
    datetime recentTime[10];
    double   recentNet[10];
+   for(int p = 0; p < 10; p++)
+     {
+      recentTime[p] = 0;
+      recentNet[p]  = 0.0;
+     }
+
    int      recentCount = 0;
    int      recentMax   = (MaxConsecutiveLosses > 0 ? (int)MathMin(MaxConsecutiveLosses + 1, 10) : 0);
 
