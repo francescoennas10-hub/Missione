@@ -2007,14 +2007,18 @@ void UpdateTradeStats()
    g_tradesThisHour  = 0;
 
    //--- Ultime operazioni chiuse, per la sequenza di perdite consecutive.
-   //    Gli array locali a dimensione fissa non sono azzerati dal compilatore.
-   datetime recentTime[10];
-   double   recentNet[10];
-   for(int p = 0; p < 10; p++)
-     {
-      recentTime[p] = 0;
-      recentNet[p]  = 0.0;
-     }
+   //    Array dinamici azzerati con ArrayInitialize: un'inizializzazione a
+   //    indice variabile non basta all'analizzatore di MetaEditor, che
+   //    segnalerebbe un possibile uso di variabile non inizializzata anche
+   //    con la lettura gia' protetta da recentCount. Le ore di chiusura sono
+   //    tenute in double per poter usare ArrayInitialize anche su di esse:
+   //    un datetime e' un intero ampiamente rappresentabile in doppia precisione.
+   double recentTime[];
+   double recentNet[];
+   ArrayResize(recentTime, 10);
+   ArrayResize(recentNet,  10);
+   ArrayInitialize(recentTime, 0.0);
+   ArrayInitialize(recentNet,  0.0);
 
    int      recentCount = 0;
    int      recentMax   = (MaxConsecutiveLosses > 0 ? (int)MathMin(MaxConsecutiveLosses + 1, 10) : 0);
@@ -2059,7 +2063,7 @@ void UpdateTradeStats()
       //--- Inserimento ordinato per ora di chiusura decrescente
       if(recentMax > 0)
         {
-         datetime ct = OrderCloseTime();
+         double ct = (double)OrderCloseTime();
          int pos = recentCount;
          while(pos > 0 && recentTime[pos - 1] < ct)
             pos--;
@@ -2108,12 +2112,14 @@ void UpdateTradeStats()
          break;
      }
 
+   datetime lastLossTime = (recentCount > 0 ? (datetime)(long)recentTime[0] : 0);
+
    if(MaxConsecutiveLosses > 0 && CooldownMinutes > 0 &&
       g_consecLosses >= MaxConsecutiveLosses && recentCount > 0 &&
-      recentTime[0] > g_lastLossHandled)
+      lastLossTime > g_lastLossHandled)
      {
-      g_lastLossHandled = recentTime[0];
-      g_cooldownUntil   = recentTime[0] + CooldownMinutes * 60;
+      g_lastLossHandled = lastLossTime;
+      g_cooldownUntil   = lastLossTime + CooldownMinutes * 60;
       Print("[", TradeComment, "] ", g_consecLosses, " perdite consecutive: pausa di ",
             CooldownMinutes, " minuti fino alle ", TimeToString(g_cooldownUntil, TIME_MINUTES), ".");
      }
