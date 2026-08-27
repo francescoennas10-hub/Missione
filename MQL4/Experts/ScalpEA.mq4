@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //|                                                     ScalpEA.mq4   |
 //|      Scalper a posizione singola, uscita solo a trailing, per MT4 |
-//|                                v1.40                              |
+//|                                v1.50                              |
 //|                                                                   |
 //|  COSA FA                                                          |
 //|   Scalper intraday ricostruito sul comportamento osservato in due |
@@ -51,7 +51,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Scalp EA"
 #property link      ""
-#property version   "1.40"
+#property version   "1.50"
 #property strict
 
 //+------------------------------------------------------------------+
@@ -131,6 +131,7 @@ input int     MinSecondsBetweenTrades = 0;  // Pausa minima tra due ingressi (se
 input int     MaxSarChain         = 0;      // Reversal SAR consecutivi (0 = illimitati)
 input int     Slippage            = 5;      // Slippage massimo (punti)
 input double  MaxSpreadPoints     = 0;      // Spread massimo ammesso (punti, 0 = disattivo)
+input double  MinTrailingToSpreadRatio = 3.0; // Trailing minimo = rapporto * spread (0 = disattivo)
 
 input string  s_levels            = "===== LIVELLI AUTOMATICI (ATR) =====";
 input int     ATR_Period          = 14;     // Periodo ATR
@@ -215,6 +216,11 @@ string   g_nextNewsLabel  = "-";
 int      g_serverGmtOffset= 0;     // secondi tra ora server e GMT
 datetime g_lastPanelPaint = 0;
 
+double   g_spreadSum      = 0.0;   // spread rilevato all'ingresso, cumulato
+int      g_spreadCount    = 0;
+double   g_slipSum        = 0.0;   // slippage sfavorevole, cumulato (punti)
+int      g_slipCount      = 0;
+
 double   g_realizedCache     = 0.0; // realizzato di giornata gia' calcolato
 datetime g_realizedCacheTime = 0;   // istante del calcolo (0 = da rifare)
 
@@ -285,7 +291,7 @@ int OnInit()
    if(showPanel && !IsOptimization())
       BuildPanel();
 
-   Print("ScalpEA v1.40 avviato su ", Symbol(), " ", TimeframeToString((ENUM_TIMEFRAMES)Period()),
+   Print("ScalpEA v1.50 avviato su ", Symbol(), " ", TimeframeToString((ENUM_TIMEFRAMES)Period()),
          " | Magic ", Magic, " | livelli ", (UseVirtualLevels ? "virtuali" : "sul broker"));
 
    return(INIT_SUCCEEDED);
@@ -1150,6 +1156,13 @@ bool ClosePositionByTicket(int ticket, string reason, bool sarOnLoss)
       if(OrderClose(ticket, lots, NormalizeDouble(price, g_digits), Slippage,
                     (type == OP_BUY ? clrDodgerBlue : clrOrangeRed)))
         {
+         if(OrderSelect(ticket, SELECT_BY_TICKET, MODE_HISTORY))
+           {
+            double slip = (type == OP_BUY ? price - OrderClosePrice()
+                                          : OrderClosePrice() - price) / g_point;
+            g_slipSum += slip;
+            g_slipCount++;
+           }
          ArrayPushInt(g_closedByEa, ticket);
          ForgetLevels(ticket);
          ResetSwingRefs();
@@ -1256,6 +1269,20 @@ bool TryOpenPosition(int type, string why, bool isSar)
       g_lastBlock = "spread " + DoubleToString(g_spreadPoints, 1) + " pt";
       return(false);
      }
+
+   // Con l'ingresso sull'Ask e l'uscita sul Bid il P/L nasce a -spread: lo
+   // spazio che resta prima dello stop e' (trailing - spread), non il
+   // trailing. Se il trailing non e' un multiplo decente dello spread
+   // l'operazione parte gia' quasi stoppata e nessuna logica di ingresso
+   // puo' rimediare.
+   double tsGuard = TrailingPoints();
+   if(MinTrailingToSpreadRatio > 0.0 && tsGuard > 0.0 &&
+      tsGuard < MinTrailingToSpreadRatio * g_spreadPoints)
+     {
+      g_lastBlock = StringFormat("trailing %.0f < %.1fx spread %.0f",
+                                 tsGuard, MinTrailingToSpreadRatio, g_spreadPoints);
+      return(false);
+     }
    if(MinSecondsBetweenTrades > 0 &&
       (int)(TimeCurrent() - g_lastTradeTime) < MinSecondsBetweenTrades)
      {
@@ -1324,8 +1351,16 @@ bool TryOpenPosition(int type, string why, bool isSar)
                              (type == OP_BUY ? clrDodgerBlue : clrOrangeRed));
       if(ticket > 0)
         {
+         double requested = price;
          if(OrderSelect(ticket, SELECT_BY_TICKET, MODE_TRADES))
             price = OrderOpenPrice();
+
+         // Slippage sfavorevole: eseguito peggio del prezzo richiesto.
+         double slip = (type == OP_BUY ? price - requested : requested - price) / g_point;
+         g_slipSum   += slip;
+         g_slipCount++;
+         g_spreadSum += g_spreadPoints;
+         g_spreadCount++;
 
          if(tpPts > 0.0)
             virtTp = NormalizeDouble(type == OP_BUY ? price + tpPts * g_point
@@ -1653,7 +1688,7 @@ int ProcessSarQueue()
 //+------------------------------------------------------------------+
 //| Pannello                                                         |
 //+------------------------------------------------------------------+
-#define PANEL_ROWS   18
+#define PANEL_ROWS   19
 #define PANEL_WIDTH  296
 #define PANEL_X      10
 #define PANEL_Y      18
@@ -1811,17 +1846,26 @@ void UpdatePanel(bool timeOk, string timeReason, bool newsBlocked, string newsLa
    color okColor  = clrLimeGreen;
    color badColor = clrTomato;
 
-   PanelRow(0,  "SCALP EA v1.40", PanelAccentColor);
+   PanelRow(0,  "SCALP EA v1.50", PanelAccentColor);
    PanelRow(1,  "----------------------------------", clrDimGray);
    PanelRow(2,  StringFormat("%-11s %s %s", "Simbolo", Symbol(),
                              TimeframeToString((ENUM_TIMEFRAMES)Period())), PanelTextColor);
    PanelRow(3,  StringFormat("%-11s %.1f pt  (stop lv %.0f)", "Spread",
                              g_spreadPoints, g_stopLevel),
                 (MaxSpreadPoints > 0.0 && g_spreadPoints > MaxSpreadPoints) ? badColor : PanelTextColor);
-   PanelRow(4,  StringFormat("%-11s %.0f pt", "ATR(" + IntegerToString(ATR_Period) + ")", atrPts), PanelTextColor);
-   PanelRow(5,  StringFormat("%-11s %s / %s", "TP / SL",
+   double avgSpread = (g_spreadCount > 0 ? g_spreadSum / g_spreadCount : g_spreadPoints);
+   double avgSlip   = (g_slipCount   > 0 ? g_slipSum   / g_slipCount   : 0.0);
+   double tsNow     = TrailingPoints();
+   double roundTrip = avgSpread + 2.0 * avgSlip;
+   double costShare = (tsNow > 0.0 ? 100.0 * roundTrip / tsNow : 0.0);
+   PanelRow(4,  StringFormat("%-11s spr %.0f slip %.1fx2 = %.0f pt (%.0f%%)", "Costi",
+                             avgSpread, avgSlip, roundTrip, costShare),
+                (costShare >= 50.0 ? clrTomato : (costShare >= 25.0 ? clrGold : PanelTextColor)));
+
+   PanelRow(5,  StringFormat("%-11s %.0f pt", "ATR(" + IntegerToString(ATR_Period) + ")", atrPts), PanelTextColor);
+   PanelRow(6,  StringFormat("%-11s %s / %s", "TP / SL",
                              LevelText(TakeProfitPoints()), StopText()), PanelTextColor);
-   PanelRow(6,  StringFormat("%-11s %s  %s  parte +%.0f", "Trailing",
+   PanelRow(7,  StringFormat("%-11s %s  %s  parte +%.0f", "Trailing",
                              LevelText(TrailingPoints()),
                              (TrailingFromEntry ? "entry" : "profit"),
                              TrailingStartThreshold()), PanelTextColor);
@@ -1830,27 +1874,27 @@ void UpdatePanel(bool timeOk, string timeReason, bool newsBlocked, string newsLa
    double downPts = (g_refHigh > 0.0 ? (g_refHigh - Bid) / g_point : 0.0);
    double vstop = 0.0, vpl = 0.0;
    bool   hasPos = CurrentVirtualStop(vstop, vpl);
-   PanelRow(7,  hasPos
+   PanelRow(8,  hasPos
                 ? StringFormat("%-11s %s  P/L %+.0f/%.0f pt", "Stop virt",
                                DoubleToString(vstop, g_digits), vpl, TrailingStartThreshold())
                 : StringFormat("%-11s %s", "Stop virt", "nessuna posizione"),
                 (hasPos && vpl >= TrailingStartThreshold() ? clrLimeGreen : PanelTextColor));
 
-   PanelRow(8,  StringFormat("%-11s +%.0f / -%.0f pt  su %d", "Swing",
+   PanelRow(9,  StringFormat("%-11s +%.0f / -%.0f pt  su %d", "Swing",
                              upPts, downPts, EntryDistance),
                 (SignalMode == SIGNAL_BAR ? clrDimGray : PanelTextColor));
 
-   PanelRow(9,  "----------------------------------", clrDimGray);
-   PanelRow(10, StringFormat("%-11s %s   SAR %s", "Direzione", DirectionName(), OnOff(SAR)), PanelTextColor);
-   PanelRow(11, StringFormat("%-11s %d/%d   buy %d  sell %d   %.2f lot", "Ordini",
+   PanelRow(10, "----------------------------------", clrDimGray);
+   PanelRow(11, StringFormat("%-11s %s   SAR %s", "Direzione", DirectionName(), OnOff(SAR)), PanelTextColor);
+   PanelRow(12, StringFormat("%-11s %d/%d   buy %d  sell %d   %.2f lot", "Ordini",
                              buys + sells, maxOrders, buys, sells, g_lots), PanelTextColor);
-   PanelRow(12, StringFormat("%-11s %.2f", "Flottante", flt), (flt >= 0.0 ? okColor : badColor));
-   PanelRow(13, StringFormat("%-11s %.2f   trade %d", "Giorno", dayPl, g_tradesToday),
+   PanelRow(13, StringFormat("%-11s %.2f", "Flottante", flt), (flt >= 0.0 ? okColor : badColor));
+   PanelRow(14, StringFormat("%-11s %.2f   trade %d", "Giorno", dayPl, g_tradesToday),
                 (dayPl >= 0.0 ? okColor : badColor));
-   PanelRow(14, "----------------------------------", clrDimGray);
-   PanelRow(15, StringFormat("%-11s %s", "Sessione", (timeOk ? "attiva" : timeReason)),
+   PanelRow(15, "----------------------------------", clrDimGray);
+   PanelRow(16, StringFormat("%-11s %s", "Sessione", (timeOk ? "attiva" : timeReason)),
                 (timeOk ? okColor : badColor));
-   PanelRow(16, StringFormat("%-11s %s", "News",
+   PanelRow(17, StringFormat("%-11s %s", "News",
                              (!NewsFilter ? "filtro OFF"
                               : (newsBlocked ? "BLOCCO " + newsLabel
                                  : g_newsStatus + " | " + g_nextNewsLabel))),
@@ -1874,7 +1918,7 @@ void UpdatePanel(bool timeOk, string timeReason, bool newsBlocked, string newsLa
          state      = "operativo | ultimo filtro: " + g_lastBlock;
          stateColor = okColor;
         }
-   PanelRow(17, StringFormat("%-11s %s", "Stato", state), stateColor);
+   PanelRow(18, StringFormat("%-11s %s", "Stato", state), stateColor);
 
    if(!IsTesting())
       ChartRedraw();

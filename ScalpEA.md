@@ -1,4 +1,4 @@
-# Scalp EA v1.40 (MQL4 / MetaTrader 4)
+# Scalp EA v1.50 (MQL4 / MetaTrader 4)
 
 Scalper intraday su XAUUSD M5: entra sui **movimenti minimi**, tiene **una posizione alla
 volta**, non manda **nessuno stop al broker** e chiude **solo con il trailing**, che nasce
@@ -242,6 +242,62 @@ bloccato un ingresso. Si aggiorna una volta al secondo.
 I primi 40 input riproducono nome, ordine ed etichetta del set allegato; il blocco
 `ADVANCED` che segue e' l'unica parte aggiunta.
 
+## Perche' il tester e il conto reale non coincidono
+
+E' la differenza piu' importante da capire prima di usare questo EA, e non dipende dal
+codice: dipende dalla geometria dell'operazione.
+
+Su un acquisto si entra sull'**Ask** e si esce sul **Bid**. Il P/L nasce quindi gia' a
+`-spread`, e lo spazio che resta prima dello stop non e' la distanza del trailing ma
+`trailing - spread`:
+
+| Spread | P/L all'apertura | Discesa che ti stoppa | Salita che attiva il trailing | Rapporto |
+|---|---|---|---|---|
+| 5 pt | -5 | 25 pt | 55 pt | 2.2x |
+| 15 pt | -15 | 15 pt | 65 pt | 4.3x |
+| 25 pt | -25 | **5 pt** | 75 pt | **15x** |
+| 30 pt | -30 | **0, stop gia' colpito** | - | - |
+
+*(trailing 30 pt, soglia 50 pt: i valori del preset)*
+
+Con 5 punti di spread hai 25 punti di respiro; con 25 ne hai 5. Non e' la stessa strategia
+con un risultato peggiore, e' una strategia diversa. E ogni stop fa scattare il SAR, che
+riapre pagando di nuovo lo spread: in una fase laterale il costo si moltiplica.
+
+A questo si aggiungono tre cose che il tester non simula: lo **slippage** (nel tester
+l'esecuzione e' istantanea al prezzo richiesto, sul reale c'e' un giro di rete a ogni
+apertura e a ogni chiusura, e con livelli virtuali *ogni* uscita e' a mercato), la
+**commissione**, e la **qualita' dei tick** (con uscite di poche decine di punti, i tick
+interpolati da dati M1 disegnano percorsi intrabar molto piu' docili di quelli veri).
+
+### Coppie di valori che reggono uno spread reale
+
+Regola: il trailing deve valere almeno 3 volte lo spread, e la soglia di partenza piu' del
+trailing (altrimenti il primo stop cade in perdita).
+
+| Spread tipico | Trailing minimo | Soglia consigliata | Primo stop | Respiro |
+|---|---|---|---|---|
+| 10 pt | 30 pt | 40 pt | +10 | 20 pt |
+| 15 pt | 45 pt | 70 pt | +25 | 30 pt |
+| 20 pt | 60 pt | 90 pt | +30 | 40 pt |
+| 25 pt | 75 pt | 120 pt | +45 | 50 pt |
+| 30 pt | 90 pt | 140 pt | +50 | 60 pt |
+
+Allargare il trailing alza pero' la perdita massima per operazione, che resta pari alla sua
+distanza: e' il compromesso da accettare, non un parametro gratis.
+
+### Gli strumenti per misurarlo
+
+- **`MinTrailingToSpreadRatio`** (3.0 di default) rifiuta l'ingresso quando il trailing non
+  vale almeno quel multiplo dello spread corrente. Il pannello scrive il motivo:
+  `trailing 30 < 3.0x spread 25`. **Con i valori del preset e uno spread reale su oro l'EA
+  smette di entrare**: e' il comportamento voluto, non un guasto. Portarlo a 0 lo disattiva.
+- **La riga `Costi` del pannello** misura sul campo lo spread medio agli ingressi e lo
+  slippage medio per gamba, e li somma in costo di andata e ritorno espresso in percentuale
+  del trailing: `Costi  spr 27 slip 4.0x2 = 35 pt (117%)`. Sopra il 25% diventa gialla,
+  sopra il 50% rossa. Confrontare quel numero con quello del tester dice in una riga quanto
+  vale il backtest.
+
 ## Note operative
 
 - **Nessuno stop arriva al broker.** Finche' MT4 e' acceso e connesso la posizione e'
@@ -255,10 +311,14 @@ I primi 40 input riproducono nome, ordine ed etichetta del set allegato; il bloc
   un'altra leva ancora: alzarla lascia correre l'inizio del movimento senza toccare il
   rischio massimo, che resta la distanza del trailing.
 - **Frequenza e costi.** A 7-8 operazioni per barra M5 lo spread e' il primo avversario:
-  con 25 punti di spread e un trailing di 70, ogni giro parte con oltre un terzo del
-  risultato gia' speso. `MaxSpreadPoints` e' a zero nel preset, com'e' nelle registrazioni:
-  impostarlo a circa il doppio dello spread tipico e' la prima modifica da fare su conto
-  reale.
+  vedere la sezione precedente. `MaxSpreadPoints` resta a zero nel preset, com'e' nelle
+  registrazioni, ma `MinTrailingToSpreadRatio` fa ora un lavoro migliore perche' si adatta
+  da solo al trailing scelto.
+- **Il risultato del tester non e' una previsione.** Un backtest che produce migliaia di
+  euro in pochi giorni con questo profilo di operazioni sta misurando un mercato senza
+  costi, non un vantaggio: il margine per operazione e' piu' piccolo del costo di andata e
+  ritorno reale. Prima di confrontare i due, allineare nel tester lo spread al valore che
+  la riga `Costi` misura sul conto reale.
 - **`EntryDistance` e' in punti, non in pip.** Su un XAUUSD a due decimali 30 punti valgono
   0.30 dollari; su un broker a tre decimali valgono 0.03. Trailing e stop, espressi in
   prezzo, non hanno questo problema.
@@ -280,3 +340,4 @@ I primi 40 input riproducono nome, ordine ed etichetta del set allegato; il bloc
 | SAR | `SnapshotOpenTickets`, `DetectBrokerClosures`, `QueueSar`, `ProcessSarQueue` |
 | Paniere | `CheckBasketLimits`, `DayProfit`, `RealizedToday`, `FloatingPoints` |
 | Interfaccia | `BuildPanel`, `PanelRow`, `UpdatePanel`, `DrawVirtualStop`, `CurrentVirtualStop` |
+| Costi | guardia `MinTrailingToSpreadRatio` in `TryOpenPosition`, statistiche `g_spreadSum` / `g_slipSum` |

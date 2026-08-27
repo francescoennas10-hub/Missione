@@ -1,4 +1,4 @@
-; ScalpEA v1.40 - preset ricavato dal set di parametri allegato
+; ScalpEA v1.50 - preset ricavato dal set di parametri allegato
 ; Ingresso sui movimenti minimi, una posizione alla volta, nessuno stop
 ; inviato al broker: l'unica uscita e' il trailing, ancorato all'ingresso.
 ; Copiare in <cartella dati MT4>/MQL4/Presets/ e caricarlo con
@@ -186,6 +186,11 @@ MaxSpreadPoints,F=0
 MaxSpreadPoints,1=0.000000
 MaxSpreadPoints,2=10.000000
 MaxSpreadPoints,3=80.000000
+MinTrailingToSpreadRatio=3.000000
+MinTrailingToSpreadRatio,F=0
+MinTrailingToSpreadRatio,1=2.000000
+MinTrailingToSpreadRatio,2=0.500000
+MinTrailingToSpreadRatio,3=5.000000
 s_levels====== LIVELLI AUTOMATICI (ATR) =====
 ATR_Period=14
 ATR_Period,F=0
