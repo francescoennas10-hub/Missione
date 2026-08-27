@@ -1,46 +1,58 @@
 //+------------------------------------------------------------------+
 //|                                                     ScalpEA.mq4   |
-//|            Scalper multi-ordine con Stop&Reverse per MetaTrader 4 |
-//|                                v1.00                              |
+//|         Scalper a posizione singola con Stop&Reverse per MT4      |
+//|                                v1.10                              |
 //|                                                                   |
 //|  COSA FA                                                          |
 //|   Scalper intraday ricostruito sul comportamento osservato nella  |
 //|   registrazione dello Strategy Tester (XAUUSD+ M5) e sul set di   |
-//|   parametri fornito. Tre meccanismi lo governano:                 |
+//|   parametri fornito. Quattro meccanismi lo governano:             |
 //|                                                                   |
-//|   1. BREAKOUT + GRIGLIA A DISTANZA FISSA                          |
+//|   1. INGRESSO SU BREAKOUT, UNA POSIZIONE ALLA VOLTA               |
 //|      L'ingresso scatta quando il prezzo supera di EntryDistance   |
-//|      punti l'estremo delle ultime SignalBars barre. Gli ingressi  |
-//|      successivi nella stessa direzione richiedono altri           |
-//|      EntryDistance punti di distanza dall'ordine piu' vicino,     |
-//|      fino a maxOrders posizioni contemporanee.                    |
+//|      punti l'estremo delle ultime SignalBars barre. Con           |
+//|      maxOrders = 1 l'EA resta su una sola posizione per volta,    |
+//|      come nel video. Alzando maxOrders si abilita la griglia:     |
+//|      ogni ordine aggiuntivo dello stesso verso richiede altri     |
+//|      EntryDistance punti di distanza dal piu' vicino.             |
 //|                                                                   |
-//|   2. LIVELLI VIRTUALI                                             |
+//|   2. NESSUN TAKE PROFIT                                           |
+//|      La posizione non ha un obiettivo fisso: resta aperta finche' |
+//|      il prezzo va nella direzione giusta. Si chiude solo in due   |
+//|      modi, sul trailing stop che segue il profitto o sullo stop   |
+//|      loss iniziale. Il take profit resta come input, ma spento.   |
+//|                                                                   |
+//|   3. LIVELLI VIRTUALI                                             |
 //|      Nel video il grafico mostra la linea di apertura della       |
 //|      posizione ma nessuna linea di stop loss o take profit: i     |
 //|      livelli non vengono inviati al broker. Qui il comportamento  |
-//|      e' riprodotto con UseVirtualLevels: TP, SL e trailing sono   |
-//|      calcolati e sorvegliati dall'EA, che chiude a mercato.       |
+//|      e' riprodotto con UseVirtualLevels: stop e trailing sono     |
+//|      calcolati e sorvegliati dall'EA, che chiude a mercato con    |
+//|      la stessa semantica del server (buy sul Bid, sell sull'Ask). |
 //|      Resta disponibile uno stop reale di emergenza, molto piu'    |
 //|      largo, come rete di sicurezza in caso di disconnessione.     |
 //|                                                                   |
-//|   3. SAR (Stop And Reverse)                                       |
+//|   4. SAR (Stop And Reverse)                                       |
 //|      Quando una posizione viene chiusa in perdita sul proprio     |
 //|      stop, l'EA apre immediatamente la posizione opposta. E' cio' |
 //|      che nel video produce le catene di frecce blu e rosse        |
-//|      alternate sugli stessi livelli di prezzo.                    |
+//|      alternate sugli stessi livelli di prezzo. Un'uscita in       |
+//|      profitto, trailing compreso, non innesca alcun reversal.     |
 //|                                                                   |
-//|  I livelli "Automatic" sono derivati dall'ATR del timeframe       |
-//|  operativo, quindi si adattano da soli alla volatilita' del       |
-//|  momento e non vanno ritarati cambiando simbolo o sessione.       |
+//|  STOP LOSS                                                        |
+//|   Distanza fissa in prezzo, StopLossPriceDistance: con 0.90 una   |
+//|   vendita a 4578.50 ha lo stop a 4579.40. Esprimerlo in prezzo    |
+//|   e non in punti lo rende indipendente dalle cifre decimali del   |
+//|   broker. Portando StopLoss su Automatic si torna alla distanza   |
+//|   proporzionale all'ATR.                                          |
 //|                                                                   |
-//|  I primi 40 input riproducono nome, ordine e valore del preset    |
-//|  allegato; il blocco "ADVANCED" in fondo espone i coefficienti    |
-//|  del motore automatico e le opzioni di sicurezza.                 |
+//|  I primi 40 input riproducono nome, ordine ed etichetta del       |
+//|  preset allegato; il blocco "ADVANCED" in fondo espone i          |
+//|  coefficienti del motore automatico e le opzioni di sicurezza.    |
 //+------------------------------------------------------------------+
 #property copyright "Scalp EA"
 #property link      ""
-#property version   "1.00"
+#property version   "1.10"
 #property strict
 
 //+------------------------------------------------------------------+
@@ -69,10 +81,10 @@ input double           Lots               = 0.01;             // Lots
 input int              Magic              = 888777;           // Magic
 input string           TradeComment       = "Scalp EA";       // TradeComment
 input int              EntryDistance      = 30;               // EntryDistance
-input ENUM_LEVEL_MODE  TakeProfit         = LEVEL_AUTOMATIC;  // TakeProfit
-input ENUM_LEVEL_MODE  StopLoss           = LEVEL_AUTOMATIC;  // StopLoss
+input ENUM_LEVEL_MODE  TakeProfit         = LEVEL_DISABLED;   // TakeProfit
+input ENUM_LEVEL_MODE  StopLoss           = LEVEL_MANUAL;     // StopLoss
 input ENUM_LEVEL_MODE  TrailingStop       = LEVEL_AUTOMATIC;  // TrailingStop
-input int              maxOrders          = 5;                // maxOrders
+input int              maxOrders          = 1;                // maxOrders
 input double           DailyProfit        = 0.0;              // DailyProfit [if 0 - not active]
 input double           MaxDD              = 0.0;              // MaxDD [if 0 - not active]
 input int              TotalSL            = 0;                // Total SL [points]
@@ -118,11 +130,13 @@ input string  s_levels            = "===== LIVELLI AUTOMATICI (ATR) =====";
 input int     ATR_Period          = 14;     // Periodo ATR
 input double  AutoTP_ATR          = 0.25;   // TP automatico = fattore * ATR
 input double  AutoSL_ATR          = 0.50;   // SL automatico = fattore * ATR
-input double  AutoTS_ATR          = 0.15;   // Trailing automatico = fattore * ATR
+input double  AutoTS_ATR          = 0.35;   // Trailing automatico = fattore * ATR
 input double  AutoTP_MinSpreadRatio = 2.0;  // TP minimo = rapporto * spread
 input int     ManualTakeProfitPoints = 50;  // TP in punti se TakeProfit = Manual
-input int     ManualStopLossPoints   = 100; // SL in punti se StopLoss = Manual
-input int     ManualTrailingPoints   = 30;  // Trailing in punti se TrailingStop = Manual
+input int     ManualStopLossPoints   = 90;  // SL in punti se StopLoss = Manual
+input double  StopLossPriceDistance  = 0.90;// SL in prezzo (ha la precedenza se > 0)
+input int     ManualTrailingPoints   = 60;  // Trailing in punti se TrailingStop = Manual
+input double  TrailingPriceDistance = 0.0; // Trailing in prezzo (ha la precedenza se > 0)
 input int     TrailingStepPoints     = 5;   // Passo minimo di avanzamento del trailing
 
 input string  s_safety            = "===== SICUREZZE =====";
@@ -256,7 +270,7 @@ int OnInit()
    if(showPanel && !IsOptimization())
       BuildPanel();
 
-   Print("ScalpEA v1.00 avviato su ", Symbol(), " ", TimeframeToString((ENUM_TIMEFRAMES)Period()),
+   Print("ScalpEA v1.10 avviato su ", Symbol(), " ", TimeframeToString((ENUM_TIMEFRAMES)Period()),
          " | Magic ", Magic, " | livelli ", (UseVirtualLevels ? "virtuali" : "sul broker"));
 
    return(INIT_SUCCEEDED);
@@ -397,7 +411,15 @@ double StopLossPoints()
 
    double sl;
    if(StopLoss == LEVEL_MANUAL)
-      sl = (double)ManualStopLossPoints;
+     {
+      // La distanza in prezzo e' indipendente dalle cifre decimali del
+      // broker: 0.90 su XAUUSD vale 0.90 dollari sia a 2 sia a 3 decimali,
+      // mentre 90 punti valgono 0.90 o 0.09 a seconda del server.
+      if(StopLossPriceDistance > 0.0 && g_point > 0.0)
+         sl = StopLossPriceDistance / g_point;
+      else
+         sl = (double)ManualStopLossPoints;
+     }
    else
       sl = AutoSL_ATR * AtrPoints();
 
@@ -418,7 +440,12 @@ double TrailingPoints()
 
    double ts;
    if(TrailingStop == LEVEL_MANUAL)
-      ts = (double)ManualTrailingPoints;
+     {
+      if(TrailingPriceDistance > 0.0 && g_point > 0.0)
+         ts = TrailingPriceDistance / g_point;
+      else
+         ts = (double)ManualTrailingPoints;
+     }
    else
       ts = AutoTS_ATR * AtrPoints();
 
@@ -1010,7 +1037,11 @@ void DetectBrokerClosures()
       ForgetLevels(ticket);
       g_realizedCacheTime = 0;
 
-      if(known && profit < 0.0)
+      if(!known)
+         continue;
+      if(profit >= 0.0)
+         g_sarChain = 0;
+      else
         {
          int opposite = (g_snapType[i] == OP_BUY ? OP_SELL : OP_BUY);
          QueueSar(opposite, "chiusura broker in perdita");
@@ -1063,8 +1094,11 @@ bool ClosePositionByTicket(int ticket, string reason, bool sarOnLoss)
          if(!IsOptimization())
             Print("ScalpEA: chiusa #", ticket, " (", reason, ") P/L ",
                   DoubleToString(profit, 2));
-         if(sarOnLoss && profit < 0.0)
-            QueueSar(type == OP_BUY ? OP_SELL : OP_BUY, reason);
+         if(profit >= 0.0)
+            g_sarChain = 0;
+         else
+            if(sarOnLoss)
+               QueueSar(type == OP_BUY ? OP_SELL : OP_BUY, reason);
          return(true);
         }
       int err = GetLastError();
@@ -1288,15 +1322,17 @@ void ManageOpenPositions()
          if(tp > 0.0 &&
             ((type == OP_BUY && Bid >= tp) || (type == OP_SELL && Ask <= tp)))
            {
-            if(ClosePositionByTicket(ticket, "take profit", false))
-               g_sarChain = 0;
+            ClosePositionByTicket(ticket, "take profit", false);
             continue;
            }
-         // 2. Uscita in perdita: e' qui che nasce il reversal
+         // 2. Uscita sullo stop. Se il trailing lo ha gia' portato oltre il
+         //    prezzo di apertura non e' piu' lo stop iniziale ma la presa di
+         //    profitto del sistema: va detto cosi' nel journal.
          if(sl > 0.0 &&
             ((type == OP_BUY && Bid <= sl) || (type == OP_SELL && Ask >= sl)))
            {
-            ClosePositionByTicket(ticket, "stop loss", true);
+            bool trailed = (type == OP_BUY ? sl > open : sl < open);
+            ClosePositionByTicket(ticket, (trailed ? "trailing stop" : "stop loss"), true);
             continue;
            }
          // 3. Trailing sul livello virtuale
@@ -1535,6 +1571,14 @@ string OnOff(bool v)
    return(v ? "ON" : "OFF");
   }
 
+//| Un livello a zero non e' "0 punti": non esiste.
+string LevelText(double points)
+  {
+   if(points <= 0.0)
+      return("off");
+   return(StringFormat("%.0f pt", points));
+  }
+
 string DirectionName()
   {
    if(TradeDirection == DIR_BUY_ONLY)  return("BuyOnly");
@@ -1559,7 +1603,7 @@ void UpdatePanel(bool timeOk, string timeReason, bool newsBlocked, string newsLa
    color okColor  = clrLimeGreen;
    color badColor = clrTomato;
 
-   PanelRow(0,  "SCALP EA v1.00", PanelAccentColor);
+   PanelRow(0,  "SCALP EA v1.10", PanelAccentColor);
    PanelRow(1,  "----------------------------------", clrDimGray);
    PanelRow(2,  StringFormat("%-11s %s %s", "Simbolo", Symbol(),
                              TimeframeToString((ENUM_TIMEFRAMES)Period())), PanelTextColor);
@@ -1567,9 +1611,11 @@ void UpdatePanel(bool timeOk, string timeReason, bool newsBlocked, string newsLa
                              g_spreadPoints, g_stopLevel),
                 (MaxSpreadPoints > 0.0 && g_spreadPoints > MaxSpreadPoints) ? badColor : PanelTextColor);
    PanelRow(4,  StringFormat("%-11s %.0f pt", "ATR(" + IntegerToString(ATR_Period) + ")", atrPts), PanelTextColor);
-   PanelRow(5,  StringFormat("%-11s %.0f / %.0f pt", "TP / SL",
-                             TakeProfitPoints(), StopLossPoints()), PanelTextColor);
-   PanelRow(6,  StringFormat("%-11s %.0f pt   livelli %s", "Trailing", TrailingPoints(),
+   PanelRow(5,  StringFormat("%-11s %s / %s", "TP / SL",
+                             LevelText(TakeProfitPoints()),
+                             LevelText(StopLossPoints())), PanelTextColor);
+   PanelRow(6,  StringFormat("%-11s %s   livelli %s", "Trailing",
+                             LevelText(TrailingPoints()),
                              (UseVirtualLevels ? "virtuali" : "broker")), PanelTextColor);
    PanelRow(7,  "----------------------------------", clrDimGray);
    PanelRow(8,  StringFormat("%-11s %s   SAR %s", "Direzione", DirectionName(), OnOff(SAR)), PanelTextColor);

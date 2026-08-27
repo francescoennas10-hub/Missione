@@ -1,8 +1,12 @@
-# Scalp EA v1.00 (MQL4 / MetaTrader 4)
+# Scalp EA v1.10 (MQL4 / MetaTrader 4)
 
-Scalper intraday con griglia a distanza fissa, livelli virtuali e **Stop And Reverse**,
-ricostruito dalla registrazione dello Strategy Tester allegata e dal set di parametri
-fornito.
+Scalper intraday a **posizione singola**, **senza take profit**, con livelli virtuali,
+stop fisso e **Stop And Reverse**, ricostruito dalla registrazione dello Strategy Tester
+allegata e dal set di parametri fornito.
+
+L'uscita ha due sole strade: il **trailing stop**, che insegue il profitto finche' il
+movimento prosegue, e lo **stop loss** iniziale, fisso a 0.90 di prezzo (una vendita a
+4578.50 ha lo stop a 4579.40).
 
 - Sorgente: `MQL4/Experts/ScalpEA.mq4`
 - Preset: `MQL4/Presets/ScalpEA_XAUUSD_M5.set`
@@ -51,17 +55,37 @@ soglia vendita  = minimo (SignalBars barre) - EntryDistance * Point
 Con `SignalBars = 1` la soglia e' l'estremo della barra precedente: e' quel che serve a un
 sistema che deve poter entrare piu' volte dentro la stessa candela M5.
 
-### 2. Griglia a distanza fissa
-Un nuovo ordine nello stesso verso viene accettato solo se **nessuna** posizione aperta di
-quel verso si trova entro `EntryDistance` punti dal prezzo corrente. Finche' il movimento
-prosegue la posizione si estende di livello in livello, fino a `maxOrders` ordini
-contemporanei; quando si ferma, la griglia smette di crescere da sola.
+### 2. Una posizione alla volta
+`maxOrders = 1`: l'EA tiene aperta una sola posizione, come si vede nel video. Il
+meccanismo della griglia resta nel codice ma dorme: alzando `maxOrders`, ogni ordine
+aggiuntivo dello stesso verso viene accettato solo se **nessuna** posizione aperta di quel
+verso si trova entro `EntryDistance` punti dal prezzo corrente.
 
-### 3. Livelli virtuali
-Con `UseVirtualLevels = true` (impostazione del video) take profit, stop loss e trailing
-**non** vengono inviati al broker: l'EA li conserva in variabili globali del terminale
-(quindi sopravvivono a un riavvio) e chiude a mercato quando il prezzo li tocca. Il
-grafico resta pulito, come nel filmato.
+### 3. Uscita: niente take profit
+La posizione **non ha un obiettivo di prezzo**. Resta aperta finche' il movimento le da'
+ragione e si chiude in due soli modi:
+
+- **trailing stop** — segue il prezzo a distanza `TrailingStop` e si attiva quando il
+  guadagno supera quella distanza piu' lo spread. Non arretra mai;
+- **stop loss** — distanza fissa dall'ingresso, `StopLossPriceDistance = 0.90`. Con una
+  vendita a `4578.50` lo stop sta a `4579.40`; con un acquisto alla stessa quota starebbe
+  a `4577.60`.
+
+Il take profit resta come input (`TakeProfit`) ma parte su `Disabled`. Portandolo su
+`Automatic` o `Manual` torna in funzione.
+
+Esprimere lo stop **in prezzo** e non in punti lo rende indipendente dalle cifre decimali
+del broker: 0.90 vale 0.90 dollari sia su un XAUUSD a due decimali sia su uno a tre,
+mentre "90 punti" varrebbe 0.90 sul primo e 0.09 sul secondo. `ManualStopLossPoints`
+resta disponibile per chi preferisce ragionare in punti: basta mettere
+`StopLossPriceDistance = 0`.
+
+### 4. Livelli virtuali
+Con `UseVirtualLevels = true` (impostazione del video) stop e trailing **non** vengono
+inviati al broker: l'EA li conserva in variabili globali del terminale (quindi
+sopravvivono a un riavvio) e chiude a mercato quando il prezzo li tocca, con la stessa
+semantica del server — un acquisto esce sul Bid, una vendita sull'Ask. Il grafico resta
+pulito, come nel filmato.
 
 La rete di sicurezza e' `UseEmergencyBrokerStop`: uno stop reale, largo
 `EmergencyStopFactor` volte quello logico, viene comunque registrato sul server. Serve a
@@ -70,9 +94,9 @@ una sola cosa, ma importante: se il terminale si spegne, la posizione non resta 
 Impostando `UseVirtualLevels = false` l'EA torna al comportamento classico, con SL e TP sul
 broker e trailing via `OrderModify`.
 
-### 4. SAR (Stop And Reverse)
+### 5. SAR (Stop And Reverse)
 Quando una posizione viene chiusa **in perdita** sul proprio stop, l'EA apre subito la
-posizione opposta. Vale sia per gli stop virtuali sia per le chiusure decise dal broker
+posizione opposta. Un'uscita in profitto — trailing compreso — non innesca nulla. Vale sia per gli stop virtuali sia per le chiusure decise dal broker
 (stop di emergenza, stop out, chiusura manuale): la scomparsa di un ticket viene
 riconosciuta confrontando lo stato degli ordini con quello del tick precedente.
 
@@ -83,25 +107,32 @@ Due limiti proteggono dal loop:
 - `MaxSarChain` limita i reversal consecutivi. Il preset lo lascia a `0` (illimitati,
   come nel video): su un conto reale un valore di 2 o 3 e' molto piu' prudente.
 
-### 5. Livelli automatici
+### 6. Livelli automatici
 `TakeProfit`, `StopLoss` e `TrailingStop` sono enumerazioni con tre stati:
 `Automatic`, `Manual`, `Disabled`.
 
-In modalita' `Automatic` le distanze si ricavano dall'ATR del timeframe operativo:
+Il preset usa `TakeProfit = Disabled`, `StopLoss = Manual` (0.90 di prezzo) e
+`TrailingStop = Automatic`. In modalita' `Automatic` le distanze si ricavano dall'ATR del
+timeframe operativo, quindi seguono da sole la volatilita':
 
 | Livello | Formula | Default | XAUUSD M5 con ATR ~200 punti |
 |---|---|---|---|
-| Take profit | `AutoTP_ATR * ATR` | 0.25 | ~50 punti |
-| Stop loss | `AutoSL_ATR * ATR` | 0.50 | ~100 punti |
-| Trailing | `AutoTS_ATR * ATR` | 0.15 | ~30 punti |
+| Take profit | `AutoTP_ATR * ATR` | 0.25 | ~50 punti (spento nel preset) |
+| Stop loss | `AutoSL_ATR * ATR` | 0.50 | ~100 punti (sostituito dal fisso 0.90) |
+| Trailing | `AutoTS_ATR * ATR` | 0.35 | ~70 punti |
 
-Sul take profit agiscono due vincoli: non puo' valere meno di
-`AutoTP_MinSpreadRatio` volte lo spread corrente (un target che non copre il costo non e'
-un target) e, con i livelli sul broker, non puo' violare `MODE_STOPLEVEL`.
+Il fattore del trailing e' 0.35 e non un valore piu' stretto per una ragione precisa:
+essendo l'**unica** uscita in profitto, un trailing troppo corto taglierebbe il movimento
+dentro il rumore invece di lasciarlo correre. Con ~70 punti di trailing e 90 punti di
+stop, il trailing entra in gioco quando il guadagno supera circa 70 punti piu' lo spread.
+
 In modalita' `Manual` valgono `ManualTakeProfitPoints`, `ManualStopLossPoints` e
-`ManualTrailingPoints`.
+`ManualTrailingPoints`; `StopLossPriceDistance` e `TrailingPriceDistance`, se maggiori di
+zero, hanno la precedenza e si esprimono in prezzo. Sul take profit, quando e' attivo,
+agiscono due vincoli: non puo' valere meno di `AutoTP_MinSpreadRatio` volte lo spread
+corrente e, con i livelli sul broker, non puo' violare `MODE_STOPLEVEL`.
 
-### 6. Protezioni di paniere
+### 7. Protezioni di paniere
 - **`Total SL [points]`** — somma algebrica dei punti a mercato di tutte le posizioni
   dell'EA. Sotto la soglia negativa il paniere viene chiuso. `0` disattiva.
 - **`DailyProfit`** — realizzato piu' flottante della giornata. Raggiunto l'obiettivo l'EA
@@ -111,14 +142,14 @@ In modalita' `Manual` valgono `ManualTakeProfitPoints`, `ManualStopLossPoints` e
 Entrambi i limiti giornalieri sono in valuta del conto; con `DailyLimitsInPercent = true`
 vengono letti come percentuale del saldo di inizio giornata.
 
-### 7. Filtri temporali
+### 8. Filtri temporali
 - `Trading24h` ignora le finestre orarie ma **non** i giorni disabilitati.
 - Le finestre sono in **ora del server**, non locale, e possono scavalcare la mezzanotte
   (`22:00` - `02:00` funziona). Start uguale a End significa 24 ore.
 - `TradingNonFarmFriday = false` esclude il primo venerdi' del mese (giorno NFP).
 - `TradingDuringHolidays = false` esclude la finestra 12 dicembre - 12 gennaio.
 
-### 8. Filtro notizie
+### 9. Filtro notizie
 Con `NewsFilter = true` l'EA scarica il calendario da `NewsCalendarUrl` (di default il feed
 settimanale di Forex Factory), tiene gli eventi delle valute selezionate con
 `Report for USD/EUR/GBP/JPY` e, se `NewsHighImpactOnly` e' attivo, solo quelli ad alto
@@ -138,9 +169,9 @@ Due limiti da conoscere:
 - Se l'URL non e' fra quelli autorizzati in MT4, il journal riporta l'errore 4060 e il
   pannello segnala `URL non autorizzato`: l'EA continua a operare **senza** filtro.
 
-### 9. Pannello
+### 10. Pannello
 Con `showPanel = true` compare un riquadro con simbolo e timeframe, spread e stop level,
-ATR, TP/SL/trailing correnti in punti, direzione e stato del SAR, ordini aperti e lotto,
+ATR, TP/SL/trailing correnti in punti (`off` quando un livello non esiste), direzione e stato del SAR, ordini aperti e lotto,
 flottante, risultato della giornata, stato della sessione, stato del filtro notizie e
 ultimo filtro che ha bloccato un ingresso. Si aggiorna una volta al secondo.
 
@@ -154,8 +185,10 @@ ultimo filtro che ha bloccato un ingresso. Si aggiorna una volta al secondo.
 | `Magic` | 888777 | identificativo delle operazioni dell'EA |
 | `TradeComment` | Scalp EA | commento degli ordini |
 | `EntryDistance` | 30 | punti di rottura e distanza minima tra ordini dello stesso verso |
-| `TakeProfit` / `StopLoss` / `TrailingStop` | Automatic | livelli derivati dall'ATR |
-| `maxOrders` | 5 | posizioni contemporanee massime |
+| `TakeProfit` | Disabled | nessun obiettivo di prezzo |
+| `StopLoss` | Manual | distanza fissa, `StopLossPriceDistance` = 0.90 |
+| `TrailingStop` | Automatic | 0.35 x ATR, unica uscita in profitto |
+| `maxOrders` | 1 | una posizione alla volta |
 | `DailyProfit` / `MaxDD` / `Total SL` | 0 | protezioni di paniere disattivate |
 | `Trading24h` | true | nessun vincolo orario |
 | `Monday`...`Friday` | true | tutti i giorni feriali abilitati |
@@ -172,7 +205,15 @@ aggiunta.
 
 - **`EntryDistance` e' in punti, non in pip.** Su un XAUUSD quotato a due decimali
   30 punti valgono 0.30 dollari. Su un broker a tre decimali gli stessi 30 punti valgono
-  0.03: prima di usare il preset su un altro server, controllare `Digits`.
+  0.03: prima di usare il preset su un altro server, controllare `Digits`. Lo stop e il
+  trailing, espressi in prezzo, non hanno questo problema.
+- **Senza take profit il profilo del rischio cambia.** Lo stop rischia 90 punti; il
+  trailing, quando si attiva, blocca all'inizio circa 70 punti meno lo spread. Le
+  operazioni vincenti utili sono quelle che scappano, non quelle che si fermano appena
+  oltre la soglia: il sistema vive sulla coda destra della distribuzione, non sulla
+  percentuale di vincite. E' esattamente il compromesso opposto a quello di uno scalper
+  con take profit stretto, e va verificato su un numero di trade sufficiente a vedere
+  quella coda.
 - Il preset lascia `MaxSpreadPoints = 0`, cioe' nessun filtro sullo spread, com'e' nel
   video. Su conti reali vale la pena impostarlo a circa il doppio dello spread tipico:
   un TP di 50 punti con 40 punti di spread non e' un'operazione, e' una commissione.
