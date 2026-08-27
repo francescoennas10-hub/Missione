@@ -1,3 +1,14 @@
+# EA per MetaTrader 4
+
+Questo repository contiene due Expert Advisor indipendenti.
+
+| EA | Sorgente | Documentazione | In una riga |
+|---|---|---|---|
+| **Scalp EA** | `MQL4/Experts/ScalpEA.mq4` | [ScalpEA.md](ScalpEA.md) | scalper M5 con griglia a distanza fissa, livelli virtuali e Stop&Reverse; preset in `MQL4/Presets/` |
+| **Adaptive Regime EA** | `MQL4/Experts/AdaptiveRegimeEA.mq4` | vedi sotto | classifica il regime di mercato e sceglie la strategia coerente |
+
+---
+
 # Adaptive Regime EA v2.00 (MQL4 / MetaTrader 4)
 
 Expert Advisor per MetaTrader 4 costruito attorno a tre principi: **adattamento al regime di
