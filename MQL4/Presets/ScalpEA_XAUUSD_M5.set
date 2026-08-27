@@ -1,5 +1,6 @@
-; ScalpEA v1.10 - preset ricavato dal set di parametri allegato
-; Senza take profit, stop fisso a 0.90 di prezzo, una posizione alla volta.
+; ScalpEA v1.20 - preset ricavato dal set di parametri allegato
+; Ingresso sui movimenti minimi, una posizione alla volta, nessuno stop
+; inviato al broker: l'unica uscita e' il trailing, ancorato all'ingresso.
 ; Copiare in <cartella dati MT4>/MQL4/Presets/ e caricarlo con
 ; "Carica" dalla scheda Parametri di Ingresso (grafico o Strategy Tester).
 TradeDirection=0
@@ -33,11 +34,11 @@ TakeProfit,F=0
 TakeProfit,1=2
 TakeProfit,2=0
 TakeProfit,3=2
-StopLoss=1
+StopLoss=2
 StopLoss,F=0
-StopLoss,1=1
+StopLoss,1=2
 StopLoss,2=0
-StopLoss,3=1
+StopLoss,3=2
 TrailingStop=0
 TrailingStop,F=0
 TrailingStop,1=0
@@ -155,6 +156,11 @@ showPanel,1=0
 showPanel,2=0
 showPanel,3=1
 s_engine====== MOTORE DEL SEGNALE =====
+SignalMode=0
+SignalMode,F=0
+SignalMode,1=0
+SignalMode,2=0
+SignalMode,3=1
 SignalBars=1
 SignalBars,F=0
 SignalBars,1=1
@@ -231,6 +237,16 @@ TrailingPriceDistance,F=0
 TrailingPriceDistance,1=0.000000
 TrailingPriceDistance,2=0.100000
 TrailingPriceDistance,3=1.500000
+MinTrailingPoints=40
+MinTrailingPoints,F=0
+MinTrailingPoints,1=20
+MinTrailingPoints,2=10
+MinTrailingPoints,3=120
+TrailingFromEntry=1
+TrailingFromEntry,F=0
+TrailingFromEntry,1=0
+TrailingFromEntry,2=0
+TrailingFromEntry,3=1
 TrailingStepPoints=5
 TrailingStepPoints,F=0
 TrailingStepPoints,1=5
@@ -242,7 +258,7 @@ UseVirtualLevels,F=0
 UseVirtualLevels,1=0
 UseVirtualLevels,2=0
 UseVirtualLevels,3=1
-UseEmergencyBrokerStop=1
+UseEmergencyBrokerStop=0
 UseEmergencyBrokerStop,F=0
 UseEmergencyBrokerStop,1=0
 UseEmergencyBrokerStop,2=0

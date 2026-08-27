@@ -1,58 +1,57 @@
 //+------------------------------------------------------------------+
 //|                                                     ScalpEA.mq4   |
-//|         Scalper a posizione singola con Stop&Reverse per MT4      |
-//|                                v1.10                              |
+//|      Scalper a posizione singola, uscita solo a trailing, per MT4 |
+//|                                v1.20                              |
 //|                                                                   |
 //|  COSA FA                                                          |
-//|   Scalper intraday ricostruito sul comportamento osservato nella  |
-//|   registrazione dello Strategy Tester (XAUUSD+ M5) e sul set di   |
-//|   parametri fornito. Quattro meccanismi lo governano:             |
+//|   Scalper intraday ricostruito sul comportamento osservato in due |
+//|   registrazioni dello Strategy Tester (XAUUSD+ M5) e sul set di   |
+//|   parametri fornito. La seconda registrazione da' la misura della |
+//|   frequenza: 13 barre M5 e i ticket che passano da #41 a #125,    |
+//|   cioe' circa 7-8 operazioni per barra, sempre una posizione alla |
+//|   volta e mai una linea di stop o di target sul grafico.          |
 //|                                                                   |
-//|   1. INGRESSO SU BREAKOUT, UNA POSIZIONE ALLA VOLTA               |
-//|      L'ingresso scatta quando il prezzo supera di EntryDistance   |
-//|      punti l'estremo delle ultime SignalBars barre. Con           |
-//|      maxOrders = 1 l'EA resta su una sola posizione per volta,    |
-//|      come nel video. Alzando maxOrders si abilita la griglia:     |
-//|      ogni ordine aggiuntivo dello stesso verso richiede altri     |
-//|      EntryDistance punti di distanza dal piu' vicino.             |
+//|   1. INGRESSO SUI MOVIMENTI MINIMI                                |
+//|      In SIGNAL_SWING il riferimento e' l'ultimo estremo toccato   |
+//|      dal prezzo, non l'estremo di una barra: appena il prezzo si  |
+//|      allontana di EntryDistance punti da quel minimo (acquisto) o |
+//|      da quel massimo (vendita), scatta l'ingresso. Il riferimento |
+//|      si azzera a ogni apertura e a ogni chiusura, quindi il       |
+//|      segnale puo' ripetersi piu' volte dentro la stessa candela. |
+//|      SIGNAL_BAR conserva la vecchia rottura di canale.            |
 //|                                                                   |
-//|   2. NESSUN TAKE PROFIT                                           |
-//|      La posizione non ha un obiettivo fisso: resta aperta finche' |
-//|      il prezzo va nella direzione giusta. Si chiude solo in due   |
-//|      modi, sul trailing stop che segue il profitto o sullo stop   |
-//|      loss iniziale. Il take profit resta come input, ma spento.   |
+//|   2. UNA POSIZIONE ALLA VOLTA                                     |
+//|      maxOrders = 1. Alzandolo si riattiva la griglia: ogni ordine |
+//|      aggiuntivo dello stesso verso pretende altri EntryDistance   |
+//|      punti di distanza dal piu' vicino.                           |
 //|                                                                   |
-//|   3. LIVELLI VIRTUALI                                             |
-//|      Nel video il grafico mostra la linea di apertura della       |
-//|      posizione ma nessuna linea di stop loss o take profit: i     |
-//|      livelli non vengono inviati al broker. Qui il comportamento  |
-//|      e' riprodotto con UseVirtualLevels: stop e trailing sono     |
-//|      calcolati e sorvegliati dall'EA, che chiude a mercato con    |
-//|      la stessa semantica del server (buy sul Bid, sell sull'Ask). |
-//|      Resta disponibile uno stop reale di emergenza, molto piu'    |
-//|      largo, come rete di sicurezza in caso di disconnessione.     |
+//|   3. USCITA SOLO A TRAILING, NIENTE STOP SUL GRAFICO              |
+//|      Nessun take profit e nessuno stop loss separato. Il trailing |
+//|      nasce alla propria distanza dal prezzo di ingresso e da li'  |
+//|      si muove solo a favore: e' insieme la protezione e l'unica   |
+//|      uscita. Vive nelle variabili globali del terminale, non      |
+//|      viene mai inviato al broker, quindi sul grafico non compare  |
+//|      nulla - com'e' nelle registrazioni.                          |
+//|                                                                   |
+//|      Ne discende una lettura utile: la distanza del trailing e'   |
+//|      anche la perdita massima. Allargarla lascia respirare il     |
+//|      movimento ma alza il rischio per operazione; MinTrailingPts  |
+//|      impedisce che scenda sotto il rumore del timeframe e chiuda  |
+//|      al primo respiro del prezzo.                                 |
 //|                                                                   |
 //|   4. SAR (Stop And Reverse)                                       |
-//|      Quando una posizione viene chiusa in perdita sul proprio     |
-//|      stop, l'EA apre immediatamente la posizione opposta. E' cio' |
-//|      che nel video produce le catene di frecce blu e rosse        |
-//|      alternate sugli stessi livelli di prezzo. Un'uscita in       |
-//|      profitto, trailing compreso, non innesca alcun reversal.     |
-//|                                                                   |
-//|  STOP LOSS                                                        |
-//|   Distanza fissa in prezzo, StopLossPriceDistance: con 0.90 una   |
-//|   vendita a 4578.50 ha lo stop a 4579.40. Esprimerlo in prezzo    |
-//|   e non in punti lo rende indipendente dalle cifre decimali del   |
-//|   broker. Portando StopLoss su Automatic si torna alla distanza   |
-//|   proporzionale all'ATR.                                          |
+//|      Una chiusura in perdita apre subito la posizione opposta.    |
+//|      E' cio' che nelle registrazioni produce le catene di frecce  |
+//|      blu e rosse alternate sugli stessi livelli. Un'uscita in     |
+//|      profitto non innesca nulla.                                  |
 //|                                                                   |
 //|  I primi 40 input riproducono nome, ordine ed etichetta del       |
-//|  preset allegato; il blocco "ADVANCED" in fondo espone i          |
-//|  coefficienti del motore automatico e le opzioni di sicurezza.    |
+//|  preset allegato; il blocco "ADVANCED" in fondo espone il motore  |
+//|  del segnale, i coefficienti automatici e le sicurezze.           |
 //+------------------------------------------------------------------+
 #property copyright "Scalp EA"
 #property link      ""
-#property version   "1.10"
+#property version   "1.20"
 #property strict
 
 //+------------------------------------------------------------------+
@@ -63,6 +62,12 @@ enum ENUM_TRADE_DIRECTION
    DIR_BUY_AND_SELL = 0,   // BuyAndSell
    DIR_BUY_ONLY     = 1,   // BuyOnly
    DIR_SELL_ONLY    = 2    // SellOnly
+  };
+
+enum ENUM_SIGNAL_MODE
+  {
+   SIGNAL_SWING = 0,   // Impulso dal minimo/massimo locale
+   SIGNAL_BAR   = 1    // Rottura del canale delle ultime barre
   };
 
 enum ENUM_LEVEL_MODE
@@ -82,7 +87,7 @@ input int              Magic              = 888777;           // Magic
 input string           TradeComment       = "Scalp EA";       // TradeComment
 input int              EntryDistance      = 30;               // EntryDistance
 input ENUM_LEVEL_MODE  TakeProfit         = LEVEL_DISABLED;   // TakeProfit
-input ENUM_LEVEL_MODE  StopLoss           = LEVEL_MANUAL;     // StopLoss
+input ENUM_LEVEL_MODE  StopLoss           = LEVEL_DISABLED;   // StopLoss
 input ENUM_LEVEL_MODE  TrailingStop       = LEVEL_AUTOMATIC;  // TrailingStop
 input int              maxOrders          = 1;                // maxOrders
 input double           DailyProfit        = 0.0;              // DailyProfit [if 0 - not active]
@@ -120,7 +125,8 @@ input bool             showPanel          = true;             // showPanel
 //| INPUT - ADVANCED: motore automatico e sicurezze                  |
 //+------------------------------------------------------------------+
 input string  s_engine            = "===== MOTORE DEL SEGNALE =====";
-input int     SignalBars          = 1;      // Barre del canale di breakout
+input ENUM_SIGNAL_MODE SignalMode = SIGNAL_SWING; // Come nasce il segnale
+input int     SignalBars          = 1;      // Barre del canale (solo modo SIGNAL_BAR)
 input int     MinSecondsBetweenTrades = 0;  // Pausa minima tra due ingressi (secondi)
 input int     MaxSarChain         = 0;      // Reversal SAR consecutivi (0 = illimitati)
 input int     Slippage            = 5;      // Slippage massimo (punti)
@@ -137,11 +143,13 @@ input int     ManualStopLossPoints   = 90;  // SL in punti se StopLoss = Manual
 input double  StopLossPriceDistance  = 0.90;// SL in prezzo (ha la precedenza se > 0)
 input int     ManualTrailingPoints   = 60;  // Trailing in punti se TrailingStop = Manual
 input double  TrailingPriceDistance = 0.0; // Trailing in prezzo (ha la precedenza se > 0)
+input int     MinTrailingPoints     = 40;  // Trailing minimo: sotto non scende mai
+input bool    TrailingFromEntry     = true;// Il trailing parte dal prezzo di ingresso
 input int     TrailingStepPoints     = 5;   // Passo minimo di avanzamento del trailing
 
 input string  s_safety            = "===== SICUREZZE =====";
 input bool    UseVirtualLevels    = true;   // TP/SL virtuali (non inviati al broker)
-input bool    UseEmergencyBrokerStop = true;// Stop reale di emergenza
+input bool    UseEmergencyBrokerStop = false;// Stop reale di emergenza (visibile sul grafico)
 input double  EmergencyStopFactor  = 3.0;   // Stop di emergenza = fattore * SL logico
 input bool    DailyLimitsInPercent = false; // DailyProfit/MaxDD in % del saldo iniziale
 input bool    CloseBeforeNews      = false; // Chiudi le posizioni all'inizio del blocco news
@@ -175,6 +183,9 @@ double   g_dayStartBalance= 0.0;   // saldo all'inizio della giornata
 bool     g_dayBlocked     = false; // giornata chiusa da DailyProfit o MaxDD
 string   g_dayBlockReason = "";
 int      g_tradesToday    = 0;
+
+double   g_refHigh        = 0.0;   // massimo locale dall'ultimo azzeramento
+double   g_refLow         = 0.0;   // minimo locale dall'ultimo azzeramento
 
 datetime g_lastTradeTime  = 0;
 int      g_sarChain       = 0;     // reversal consecutivi gia' eseguiti
@@ -270,7 +281,7 @@ int OnInit()
    if(showPanel && !IsOptimization())
       BuildPanel();
 
-   Print("ScalpEA v1.10 avviato su ", Symbol(), " ", TimeframeToString((ENUM_TIMEFRAMES)Period()),
+   Print("ScalpEA v1.20 avviato su ", Symbol(), " ", TimeframeToString((ENUM_TIMEFRAMES)Period()),
          " | Magic ", Magic, " | livelli ", (UseVirtualLevels ? "virtuali" : "sul broker"));
 
    return(INIT_SUCCEEDED);
@@ -448,6 +459,11 @@ double TrailingPoints()
      }
    else
       ts = AutoTS_ATR * AtrPoints();
+
+   // Un trailing che scende sotto il rumore del timeframe non protegge il
+   // profitto: chiude l'operazione sul primo respiro del prezzo.
+   if(ts < (double)MinTrailingPoints)
+      ts = (double)MinTrailingPoints;
 
    double minBroker = MinBrokerDistance();
    if(!UseVirtualLevels && ts < minBroker)
@@ -878,6 +894,14 @@ void EnsureLevels(int ticket, int type, double openPrice, double &tp, double &sl
 
    double tpPts = TakeProfitPoints();
    double slPts = StopLossPoints();
+
+   // Senza stop loss separato e' il trailing a proteggere la posizione fin
+   // dal primo tick: nasce alla sua distanza dal prezzo di ingresso e da li'
+   // in poi si muove solo a favore. La distanza del trailing e' quindi anche
+   // la perdita massima dell'operazione.
+   if(slPts <= 0.0 && TrailingFromEntry)
+      slPts = TrailingPoints();
+
    tp = 0.0;
    sl = 0.0;
    if(type == OP_BUY)
@@ -1035,6 +1059,7 @@ void DetectBrokerClosures()
          known  = true;
         }
       ForgetLevels(ticket);
+      ResetSwingRefs();
       g_realizedCacheTime = 0;
 
       if(!known)
@@ -1090,6 +1115,7 @@ bool ClosePositionByTicket(int ticket, string reason, bool sarOnLoss)
         {
          ArrayPushInt(g_closedByEa, ticket);
          ForgetLevels(ticket);
+         ResetSwingRefs();
          g_realizedCacheTime = 0;
          if(!IsOptimization())
             Print("ScalpEA: chiusa #", ticket, " (", reason, ") P/L ",
@@ -1208,6 +1234,14 @@ bool TryOpenPosition(int type, string why, bool isSar)
    double tpPts = TakeProfitPoints();
    double slPts = StopLossPoints();
 
+   // slPts alimenta l'eventuale stop inviato al broker; virtSlPts il livello
+   // sorvegliato dall'EA. Senza stop loss separato il secondo nasce comunque,
+   // alla distanza del trailing, mentre il primo resta a zero: e' cosi' che la
+   // posizione e' protetta senza che nulla compaia sul grafico.
+   double virtSlPts = slPts;
+   if(virtSlPts <= 0.0 && TrailingFromEntry)
+      virtSlPts = TrailingPoints();
+
    double sendSl = 0.0;
    double sendTp = 0.0;
    double virtTp = 0.0;
@@ -1258,11 +1292,12 @@ bool TryOpenPosition(int type, string why, bool isSar)
          if(tpPts > 0.0)
             virtTp = NormalizeDouble(type == OP_BUY ? price + tpPts * g_point
                                                     : price - tpPts * g_point, g_digits);
-         if(slPts > 0.0)
-            virtSl = NormalizeDouble(type == OP_BUY ? price - slPts * g_point
-                                                    : price + slPts * g_point, g_digits);
+         if(virtSlPts > 0.0)
+            virtSl = NormalizeDouble(type == OP_BUY ? price - virtSlPts * g_point
+                                                    : price + virtSlPts * g_point, g_digits);
          StoreLevels(ticket, virtTp, virtSl);
 
+         ResetSwingRefs();
          g_lastTradeTime = TimeCurrent();
          g_tradesToday++;
          if(isSar)
@@ -1332,36 +1367,36 @@ void ManageOpenPositions()
             ((type == OP_BUY && Bid <= sl) || (type == OP_SELL && Ask >= sl)))
            {
             bool trailed = (type == OP_BUY ? sl > open : sl < open);
-            ClosePositionByTicket(ticket, (trailed ? "trailing stop" : "stop loss"), true);
+            string why = (trailed ? "trailing in profitto"
+                                  : (TrailingFromEntry ? "trailing iniziale" : "stop loss"));
+            ClosePositionByTicket(ticket, why, true);
             continue;
            }
-         // 3. Trailing sul livello virtuale
+         // 3. Trailing sul livello virtuale. Con TrailingFromEntry il livello
+         //    esiste gia' dall'apertura e insegue subito; altrimenti entra in
+         //    funzione solo quando il guadagno supera la sua stessa distanza.
          if(tsPts > 0.0)
            {
             if(type == OP_BUY)
               {
-               double gainPts = (Bid - open) / g_point;
-               if(gainPts >= tsPts + g_spreadPoints)
+               bool   ready = TrailingFromEntry ||
+                              ((Bid - open) / g_point >= tsPts + g_spreadPoints);
+               double newSl = NormalizeDouble(Bid - tsPts * g_point, g_digits);
+               if(ready && (sl == 0.0 || newSl > sl + stepPts * g_point))
                  {
-                  double newSl = NormalizeDouble(Bid - tsPts * g_point, g_digits);
-                  if(newSl > sl + stepPts * g_point || sl == 0.0)
-                    {
-                     sl = newSl;
-                     StoreLevels(ticket, tp, sl);
-                    }
+                  sl = newSl;
+                  StoreLevels(ticket, tp, sl);
                  }
               }
             else
               {
-               double gainPts = (open - Ask) / g_point;
-               if(gainPts >= tsPts + g_spreadPoints)
+               bool   ready = TrailingFromEntry ||
+                              ((open - Ask) / g_point >= tsPts + g_spreadPoints);
+               double newSl = NormalizeDouble(Ask + tsPts * g_point, g_digits);
+               if(ready && (sl == 0.0 || newSl < sl - stepPts * g_point))
                  {
-                  double newSl = NormalizeDouble(Ask + tsPts * g_point, g_digits);
-                  if(sl == 0.0 || newSl < sl - stepPts * g_point)
-                    {
-                     sl = newSl;
-                     StoreLevels(ticket, tp, sl);
-                    }
+                  sl = newSl;
+                  StoreLevels(ticket, tp, sl);
                  }
               }
            }
@@ -1471,9 +1506,53 @@ void ResetDayState(bool force)
       LoadNewsCalendar();
   }
 
-//| Segnale di ingresso: rottura del canale delle ultime SignalBars barre
-//| di almeno EntryDistance punti. +1 acquisto, -1 vendita, 0 nessun segnale.
-int EntrySignal()
+//| Azzera il riferimento di swing sul prezzo corrente. Va chiamato dopo
+//| ogni apertura e ogni chiusura: il movimento da misurare e' quello che
+//| nasce da li' in avanti, non quello gia' sfruttato.
+void ResetSwingRefs()
+  {
+   g_refHigh = Bid;
+   g_refLow  = Bid;
+  }
+
+//| Estende il riferimento di swing con il prezzo dell'ultimo tick.
+void UpdateSwingRefs()
+  {
+   if(g_refHigh <= 0.0 || g_refLow <= 0.0)
+     {
+      ResetSwingRefs();
+      return;
+     }
+   if(Bid > g_refHigh)
+      g_refHigh = Bid;
+   if(Bid < g_refLow)
+      g_refLow = Bid;
+  }
+
+//| SIGNAL_SWING: entra quando il prezzo si e' mosso di EntryDistance punti
+//| dal minimo (acquisto) o dal massimo (vendita) locale. E' la modalita'
+//| che sfrutta i movimenti minimi: il riferimento e' l'ultimo estremo
+//| toccato, non l'estremo di una barra, quindi il segnale puo' scattare
+//| piu' volte dentro la stessa candela.
+int SwingSignal()
+  {
+   double dist = EntryDistance * g_point;
+   if(dist <= 0.0)
+      return(0);
+
+   double upMove   = g_refLow  > 0.0 ? Bid - g_refLow  : 0.0;
+   double downMove = g_refHigh > 0.0 ? g_refHigh - Bid : 0.0;
+
+   if(upMove >= dist && upMove >= downMove)
+      return(1);
+   if(downMove >= dist)
+      return(-1);
+   return(0);
+  }
+
+//| SIGNAL_BAR: rottura del canale delle ultime SignalBars barre chiuse di
+//| almeno EntryDistance punti.
+int BarSignal()
   {
    int hi = iHighest(Symbol(), (ENUM_TIMEFRAMES)Period(), MODE_HIGH, SignalBars, 1);
    int lo = iLowest(Symbol(),  (ENUM_TIMEFRAMES)Period(), MODE_LOW,  SignalBars, 1);
@@ -1488,6 +1567,14 @@ int EntrySignal()
    if(Bid <= lower)
       return(-1);
    return(0);
+  }
+
+//| Segnale di ingresso. +1 acquisto, -1 vendita, 0 nessun segnale.
+int EntrySignal()
+  {
+   if(SignalMode == SIGNAL_BAR)
+      return(BarSignal());
+   return(SwingSignal());
   }
 
 //| Esegue i reversal accodati e restituisce quanti ne ha aperti.
@@ -1509,7 +1596,7 @@ int ProcessSarQueue()
 //+------------------------------------------------------------------+
 //| Pannello                                                         |
 //+------------------------------------------------------------------+
-#define PANEL_ROWS   16
+#define PANEL_ROWS   17
 #define PANEL_WIDTH  296
 #define PANEL_X      10
 #define PANEL_Y      18
@@ -1579,6 +1666,18 @@ string LevelText(double points)
    return(StringFormat("%.0f pt", points));
   }
 
+//| Senza stop loss separato la protezione e' il trailing stesso: dirlo e'
+//| piu' utile che scrivere "off" accanto a una posizione che uno stop ce l'ha.
+string StopText()
+  {
+   double sl = StopLossPoints();
+   if(sl > 0.0)
+      return(LevelText(sl));
+   if(TrailingFromEntry && TrailingPoints() > 0.0)
+      return("= trailing");
+   return("off");
+  }
+
 string DirectionName()
   {
    if(TradeDirection == DIR_BUY_ONLY)  return("BuyOnly");
@@ -1603,7 +1702,7 @@ void UpdatePanel(bool timeOk, string timeReason, bool newsBlocked, string newsLa
    color okColor  = clrLimeGreen;
    color badColor = clrTomato;
 
-   PanelRow(0,  "SCALP EA v1.10", PanelAccentColor);
+   PanelRow(0,  "SCALP EA v1.20", PanelAccentColor);
    PanelRow(1,  "----------------------------------", clrDimGray);
    PanelRow(2,  StringFormat("%-11s %s %s", "Simbolo", Symbol(),
                              TimeframeToString((ENUM_TIMEFRAMES)Period())), PanelTextColor);
@@ -1612,22 +1711,28 @@ void UpdatePanel(bool timeOk, string timeReason, bool newsBlocked, string newsLa
                 (MaxSpreadPoints > 0.0 && g_spreadPoints > MaxSpreadPoints) ? badColor : PanelTextColor);
    PanelRow(4,  StringFormat("%-11s %.0f pt", "ATR(" + IntegerToString(ATR_Period) + ")", atrPts), PanelTextColor);
    PanelRow(5,  StringFormat("%-11s %s / %s", "TP / SL",
-                             LevelText(TakeProfitPoints()),
-                             LevelText(StopLossPoints())), PanelTextColor);
-   PanelRow(6,  StringFormat("%-11s %s   livelli %s", "Trailing",
+                             LevelText(TakeProfitPoints()), StopText()), PanelTextColor);
+   PanelRow(6,  StringFormat("%-11s %s   %s", "Trailing",
                              LevelText(TrailingPoints()),
-                             (UseVirtualLevels ? "virtuali" : "broker")), PanelTextColor);
-   PanelRow(7,  "----------------------------------", clrDimGray);
-   PanelRow(8,  StringFormat("%-11s %s   SAR %s", "Direzione", DirectionName(), OnOff(SAR)), PanelTextColor);
-   PanelRow(9,  StringFormat("%-11s %d/%d   buy %d  sell %d   %.2f lot", "Ordini",
+                             (TrailingFromEntry ? "dall'ingresso" : "sul profitto")), PanelTextColor);
+
+   double upPts   = (g_refLow  > 0.0 ? (Bid - g_refLow)  / g_point : 0.0);
+   double downPts = (g_refHigh > 0.0 ? (g_refHigh - Bid) / g_point : 0.0);
+   PanelRow(7,  StringFormat("%-11s +%.0f / -%.0f pt  su %d", "Swing",
+                             upPts, downPts, EntryDistance),
+                (SignalMode == SIGNAL_BAR ? clrDimGray : PanelTextColor));
+
+   PanelRow(8,  "----------------------------------", clrDimGray);
+   PanelRow(9,  StringFormat("%-11s %s   SAR %s", "Direzione", DirectionName(), OnOff(SAR)), PanelTextColor);
+   PanelRow(10, StringFormat("%-11s %d/%d   buy %d  sell %d   %.2f lot", "Ordini",
                              buys + sells, maxOrders, buys, sells, g_lots), PanelTextColor);
-   PanelRow(10, StringFormat("%-11s %.2f", "Flottante", flt), (flt >= 0.0 ? okColor : badColor));
-   PanelRow(11, StringFormat("%-11s %.2f   trade %d", "Giorno", dayPl, g_tradesToday),
+   PanelRow(11, StringFormat("%-11s %.2f", "Flottante", flt), (flt >= 0.0 ? okColor : badColor));
+   PanelRow(12, StringFormat("%-11s %.2f   trade %d", "Giorno", dayPl, g_tradesToday),
                 (dayPl >= 0.0 ? okColor : badColor));
-   PanelRow(12, "----------------------------------", clrDimGray);
-   PanelRow(13, StringFormat("%-11s %s", "Sessione", (timeOk ? "attiva" : timeReason)),
+   PanelRow(13, "----------------------------------", clrDimGray);
+   PanelRow(14, StringFormat("%-11s %s", "Sessione", (timeOk ? "attiva" : timeReason)),
                 (timeOk ? okColor : badColor));
-   PanelRow(14, StringFormat("%-11s %s", "News",
+   PanelRow(15, StringFormat("%-11s %s", "News",
                              (!NewsFilter ? "filtro OFF"
                               : (newsBlocked ? "BLOCCO " + newsLabel
                                  : g_newsStatus + " | " + g_nextNewsLabel))),
@@ -1651,7 +1756,7 @@ void UpdatePanel(bool timeOk, string timeReason, bool newsBlocked, string newsLa
          state      = "operativo | ultimo filtro: " + g_lastBlock;
          stateColor = okColor;
         }
-   PanelRow(15, StringFormat("%-11s %s", "Stato", state), stateColor);
+   PanelRow(16, StringFormat("%-11s %s", "Stato", state), stateColor);
 
    if(!IsTesting())
       ChartRedraw();
@@ -1663,6 +1768,7 @@ void UpdatePanel(bool timeOk, string timeReason, bool newsBlocked, string newsLa
 void OnTick()
   {
    UpdateSymbolInfo();
+   UpdateSwingRefs();
    ResetDayState(false);
 
    if(NewsFilter && !IsTesting() && (int)(TimeCurrent() - g_newsLastLoad) > 4 * 3600)

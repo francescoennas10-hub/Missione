@@ -4,7 +4,7 @@ Questo repository contiene due Expert Advisor indipendenti.
 
 | EA | Sorgente | Documentazione | In una riga |
 |---|---|---|---|
-| **Scalp EA** | `MQL4/Experts/ScalpEA.mq4` | [ScalpEA.md](ScalpEA.md) | scalper M5 a posizione singola, senza take profit: esce su trailing o su stop fisso, con Stop&Reverse; preset in `MQL4/Presets/` |
+| **Scalp EA** | `MQL4/Experts/ScalpEA.mq4` | [ScalpEA.md](ScalpEA.md) | scalper M5 sui movimenti minimi: una posizione alla volta, nessuno stop inviato al broker, uscita solo a trailing, Stop&Reverse sulle perdite |
 | **Adaptive Regime EA** | `MQL4/Experts/AdaptiveRegimeEA.mq4` | vedi sotto | classifica il regime di mercato e sceglie la strategia coerente |
 
 ---
