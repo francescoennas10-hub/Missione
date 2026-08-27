@@ -1,4 +1,4 @@
-; ScalpEA v1.30 - preset ricavato dal set di parametri allegato
+; ScalpEA v1.40 - preset ricavato dal set di parametri allegato
 ; Ingresso sui movimenti minimi, una posizione alla volta, nessuno stop
 ; inviato al broker: l'unica uscita e' il trailing, ancorato all'ingresso.
 ; Copiare in <cartella dati MT4>/MQL4/Presets/ e caricarlo con
@@ -39,11 +39,11 @@ StopLoss,F=0
 StopLoss,1=2
 StopLoss,2=0
 StopLoss,3=2
-TrailingStop=0
+TrailingStop=1
 TrailingStop,F=0
-TrailingStop,1=0
+TrailingStop,1=1
 TrailingStop,2=0
-TrailingStop,3=0
+TrailingStop,3=1
 maxOrders=1
 maxOrders,F=0
 maxOrders,1=1
@@ -232,9 +232,9 @@ ManualTrailingPoints,F=0
 ManualTrailingPoints,1=60
 ManualTrailingPoints,2=0
 ManualTrailingPoints,3=0
-TrailingPriceDistance=0.000000
+TrailingPriceDistance=0.300000
 TrailingPriceDistance,F=0
-TrailingPriceDistance,1=0.000000
+TrailingPriceDistance,1=0.200000
 TrailingPriceDistance,2=0.100000
 TrailingPriceDistance,3=1.500000
 MinTrailingPoints=40
@@ -252,9 +252,9 @@ TrailingStartPoints,F=0
 TrailingStartPoints,1=0
 TrailingStartPoints,2=25
 TrailingStartPoints,3=200
-TrailingStartPriceDistance=0.000000
+TrailingStartPriceDistance=0.500000
 TrailingStartPriceDistance,F=0
-TrailingStartPriceDistance,1=0.000000
+TrailingStartPriceDistance,1=0.300000
 TrailingStartPriceDistance,2=0.100000
 TrailingStartPriceDistance,3=2.000000
 TrailingStepPoints=5
@@ -311,3 +311,10 @@ PanelTextColor=16777215
 PanelTextColor,F=0
 PanelAccentColor=16760576
 PanelAccentColor,F=0
+ShowVirtualLevels=1
+ShowVirtualLevels,F=0
+ShowVirtualLevels,1=0
+ShowVirtualLevels,2=0
+ShowVirtualLevels,3=1
+VirtualStopColor=42495
+VirtualStopColor,F=0

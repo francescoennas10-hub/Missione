@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //|                                                     ScalpEA.mq4   |
 //|      Scalper a posizione singola, uscita solo a trailing, per MT4 |
-//|                                v1.30                              |
+//|                                v1.40                              |
 //|                                                                   |
 //|  COSA FA                                                          |
 //|   Scalper intraday ricostruito sul comportamento osservato in due |
@@ -51,7 +51,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Scalp EA"
 #property link      ""
-#property version   "1.30"
+#property version   "1.40"
 #property strict
 
 //+------------------------------------------------------------------+
@@ -88,7 +88,7 @@ input string           TradeComment       = "Scalp EA";       // TradeComment
 input int              EntryDistance      = 30;               // EntryDistance
 input ENUM_LEVEL_MODE  TakeProfit         = LEVEL_DISABLED;   // TakeProfit
 input ENUM_LEVEL_MODE  StopLoss           = LEVEL_DISABLED;   // StopLoss
-input ENUM_LEVEL_MODE  TrailingStop       = LEVEL_AUTOMATIC;  // TrailingStop
+input ENUM_LEVEL_MODE  TrailingStop       = LEVEL_MANUAL;     // TrailingStop
 input int              maxOrders          = 1;                // maxOrders
 input double           DailyProfit        = 0.0;              // DailyProfit [if 0 - not active]
 input double           MaxDD              = 0.0;              // MaxDD [if 0 - not active]
@@ -142,11 +142,11 @@ input int     ManualTakeProfitPoints = 50;  // TP in punti se TakeProfit = Manua
 input int     ManualStopLossPoints   = 90;  // SL in punti se StopLoss = Manual
 input double  StopLossPriceDistance  = 0.90;// SL in prezzo (ha la precedenza se > 0)
 input int     ManualTrailingPoints   = 60;  // Trailing in punti se TrailingStop = Manual
-input double  TrailingPriceDistance = 0.0; // Trailing in prezzo (ha la precedenza se > 0)
-input int     MinTrailingPoints     = 40;  // Trailing minimo: sotto non scende mai
+input double  TrailingPriceDistance = 0.30;// Trailing in prezzo (ha la precedenza se > 0)
+input int     MinTrailingPoints     = 40;  // Pavimento del trailing, solo in modo Automatic
 input bool    TrailingFromEntry     = true;// Lo stop esiste gia' dal prezzo di ingresso
 input int     TrailingStartPoints   = 0;   // Profitto prima che il trailing si muova (0 = automatico)
-input double  TrailingStartPriceDistance = 0.0; // Come sopra ma in prezzo (precedenza se > 0)
+input double  TrailingStartPriceDistance = 0.50; // Come sopra ma in prezzo (precedenza se > 0)
 input int     TrailingStepPoints     = 5;   // Passo minimo di avanzamento del trailing
 
 input string  s_safety            = "===== SICUREZZE =====";
@@ -166,6 +166,8 @@ input string  s_ui                = "===== INTERFACCIA =====";
 input int     PanelCorner         = 0;      // Angolo del pannello (0=TL 1=TR 2=BL 3=BR)
 input color   PanelTextColor      = clrWhite;   // Colore del testo
 input color   PanelAccentColor    = clrDeepSkyBlue; // Colore dei titoli
+input bool    ShowVirtualLevels   = true;   // Disegna lo stop virtuale sul grafico
+input color   VirtualStopColor    = clrOrange;    // Colore dello stop virtuale
 
 //+------------------------------------------------------------------+
 //| Stato globale                                                    |
@@ -283,7 +285,7 @@ int OnInit()
    if(showPanel && !IsOptimization())
       BuildPanel();
 
-   Print("ScalpEA v1.30 avviato su ", Symbol(), " ", TimeframeToString((ENUM_TIMEFRAMES)Period()),
+   Print("ScalpEA v1.40 avviato su ", Symbol(), " ", TimeframeToString((ENUM_TIMEFRAMES)Period()),
          " | Magic ", Magic, " | livelli ", (UseVirtualLevels ? "virtuali" : "sul broker"));
 
    return(INIT_SUCCEEDED);
@@ -471,18 +473,22 @@ double TrailingPoints()
    double ts;
    if(TrailingStop == LEVEL_MANUAL)
      {
+      // Valore dichiarato dall'utente: vale esattamente quello, nessun
+      // pavimento e nessuna correzione sulla volatilita'.
       if(TrailingPriceDistance > 0.0 && g_point > 0.0)
          ts = TrailingPriceDistance / g_point;
       else
          ts = (double)ManualTrailingPoints;
      }
    else
+     {
+      // Solo qui entra l'ATR, e solo qui ha senso un pavimento: un trailing
+      // proporzionale alla volatilita' puo' scendere sotto il rumore del
+      // timeframe e chiudere l'operazione sul primo respiro del prezzo.
       ts = AutoTS_ATR * AtrPoints();
-
-   // Un trailing che scende sotto il rumore del timeframe non protegge il
-   // profitto: chiude l'operazione sul primo respiro del prezzo.
-   if(ts < (double)MinTrailingPoints)
-      ts = (double)MinTrailingPoints;
+      if(ts < (double)MinTrailingPoints)
+         ts = (double)MinTrailingPoints;
+     }
 
    double minBroker = MinBrokerDistance();
    if(!UseVirtualLevels && ts < minBroker)
@@ -887,39 +893,51 @@ void ForgetLevels(int ticket)
   {
    string a = GvName(ticket, "TP");
    string b = GvName(ticket, "SL");
+   string c = GvName(ticket, "TS");
    if(GlobalVariableCheck(a)) GlobalVariableDel(a);
    if(GlobalVariableCheck(b)) GlobalVariableDel(b);
+   if(GlobalVariableCheck(c)) GlobalVariableDel(c);
   }
 
-void StoreLevels(int ticket, double tp, double sl)
+//| Oltre a TP e SL viene memorizzata la distanza del trailing valida per
+//| quel ticket. Ricalcolarla a ogni tick sarebbe un errore: lo stop e' stato
+//| ancorato con la distanza di allora, e se quella di adesso e' piu' larga
+//| il livello inseguito arretra rispetto all'ancora e lo stop resta fermo -
+//| il trailing sembra morto pur essendo attivo. Congelarla all'apertura
+//| rende il comportamento identico su tester e su conto reale.
+void StoreLevels(int ticket, double tp, double sl, double tsPts)
   {
    GlobalVariableSet(GvName(ticket, "TP"), tp);
    GlobalVariableSet(GvName(ticket, "SL"), sl);
+   GlobalVariableSet(GvName(ticket, "TS"), tsPts);
   }
 
 //| Recupera i livelli virtuali del ticket; se mancano li ricostruisce
 //| dai parametri correnti (caso tipico: EA riavviato a mercato aperto).
-void EnsureLevels(int ticket, int type, double openPrice, double &tp, double &sl)
+void EnsureLevels(int ticket, int type, double openPrice, double &tp, double &sl, double &tsPts)
   {
    string nameTp = GvName(ticket, "TP");
    string nameSl = GvName(ticket, "SL");
+   string nameTs = GvName(ticket, "TS");
 
-   if(GlobalVariableCheck(nameTp) && GlobalVariableCheck(nameSl))
+   if(GlobalVariableCheck(nameTp) && GlobalVariableCheck(nameSl) && GlobalVariableCheck(nameTs))
      {
-      tp = GlobalVariableGet(nameTp);
-      sl = GlobalVariableGet(nameSl);
+      tp     = GlobalVariableGet(nameTp);
+      sl     = GlobalVariableGet(nameSl);
+      tsPts  = GlobalVariableGet(nameTs);
       return;
      }
 
    double tpPts = TakeProfitPoints();
    double slPts = StopLossPoints();
+   tsPts = TrailingPoints();
 
    // Senza stop loss separato e' il trailing a proteggere la posizione fin
    // dal primo tick: nasce alla sua distanza dal prezzo di ingresso e da li'
    // in poi si muove solo a favore. La distanza del trailing e' quindi anche
    // la perdita massima dell'operazione.
    if(slPts <= 0.0 && TrailingFromEntry)
-      slPts = TrailingPoints();
+      slPts = tsPts;
 
    tp = 0.0;
    sl = 0.0;
@@ -933,7 +951,7 @@ void EnsureLevels(int ticket, int type, double openPrice, double &tp, double &sl
       if(tpPts > 0.0) tp = openPrice - tpPts * g_point;
       if(slPts > 0.0) sl = openPrice + slPts * g_point;
      }
-   StoreLevels(ticket, tp, sl);
+   StoreLevels(ticket, tp, sl, tsPts);
   }
 
 //| Numero di posizioni aperte dall'EA. type = -1 per contarle tutte.
@@ -1257,9 +1275,10 @@ bool TryOpenPosition(int type, string why, bool isSar)
    // sorvegliato dall'EA. Senza stop loss separato il secondo nasce comunque,
    // alla distanza del trailing, mentre il primo resta a zero: e' cosi' che la
    // posizione e' protetta senza che nulla compaia sul grafico.
-   double virtSlPts = slPts;
+   double tsPtsAtOpen = TrailingPoints();
+   double virtSlPts   = slPts;
    if(virtSlPts <= 0.0 && TrailingFromEntry)
-      virtSlPts = TrailingPoints();
+      virtSlPts = tsPtsAtOpen;
 
    double sendSl = 0.0;
    double sendTp = 0.0;
@@ -1314,7 +1333,7 @@ bool TryOpenPosition(int type, string why, bool isSar)
          if(virtSlPts > 0.0)
             virtSl = NormalizeDouble(type == OP_BUY ? price - virtSlPts * g_point
                                                     : price + virtSlPts * g_point, g_digits);
-         StoreLevels(ticket, virtTp, virtSl);
+         StoreLevels(ticket, virtTp, virtSl, tsPtsAtOpen);
 
          ResetSwingRefs();
          g_lastTradeTime = TimeCurrent();
@@ -1346,12 +1365,29 @@ bool TryOpenPosition(int type, string why, bool isSar)
    return(false);
   }
 
+//| Scrive nel journal il momento in cui il trailing si stacca dall'ancora
+//| di apertura. Senza questa riga, con i livelli virtuali non c'e' modo di
+//| sapere se il trailing e' partito: sul grafico non compare nulla.
+void LogFirstTrail(int ticket, int type, double open, double sl, double tsPts)
+  {
+   if(IsOptimization())
+      return;
+   double anchor = (type == OP_BUY ? open - tsPts * g_point : open + tsPts * g_point);
+   if(MathAbs(sl - anchor) > g_point * 0.5)
+      return;   // si e' gia' mosso in precedenza
+   Print("ScalpEA: trailing attivato su #", ticket,
+         " a ", DoubleToString((type == OP_BUY ? Bid : Ask), g_digits),
+         " (P/L ", DoubleToString(type == OP_BUY ? (Bid - open) / g_point
+                                                 : (open - Ask) / g_point, 0),
+         " pt, soglia ", DoubleToString(TrailingStartThreshold(), 0),
+         " pt, distanza ", DoubleToString(tsPts, 0), " pt)");
+  }
+
 //| Sorveglianza dei livelli: take profit, stop loss e trailing.
 void ManageOpenPositions()
   {
-   double tsPts   = TrailingPoints();
    double startPts = TrailingStartThreshold();
-   double stepPts = (double)TrailingStepPoints;
+   double stepPts  = (double)TrailingStepPoints;
    if(stepPts < 1.0)
       stepPts = 1.0;
 
@@ -1368,8 +1404,8 @@ void ManageOpenPositions()
 
       int    ticket = OrderTicket();
       double open   = OrderOpenPrice();
-      double tp = 0.0, sl = 0.0;
-      EnsureLevels(ticket, type, open, tp, sl);
+      double tp = 0.0, sl = 0.0, tsPts = 0.0;
+      EnsureLevels(ticket, type, open, tp, sl, tsPts);
 
       if(UseVirtualLevels)
         {
@@ -1404,8 +1440,9 @@ void ManageOpenPositions()
                double newSl = NormalizeDouble(Bid - tsPts * g_point, g_digits);
                if(ready && (sl == 0.0 || newSl > sl + stepPts * g_point))
                  {
+                  LogFirstTrail(ticket, type, open, sl, tsPts);
                   sl = newSl;
-                  StoreLevels(ticket, tp, sl);
+                  StoreLevels(ticket, tp, sl, tsPts);
                  }
               }
             else
@@ -1414,8 +1451,9 @@ void ManageOpenPositions()
                double newSl = NormalizeDouble(Ask + tsPts * g_point, g_digits);
                if(ready && (sl == 0.0 || newSl < sl - stepPts * g_point))
                  {
+                  LogFirstTrail(ticket, type, open, sl, tsPts);
                   sl = newSl;
-                  StoreLevels(ticket, tp, sl);
+                  StoreLevels(ticket, tp, sl, tsPts);
                  }
               }
            }
@@ -1615,7 +1653,7 @@ int ProcessSarQueue()
 //+------------------------------------------------------------------+
 //| Pannello                                                         |
 //+------------------------------------------------------------------+
-#define PANEL_ROWS   17
+#define PANEL_ROWS   18
 #define PANEL_WIDTH  296
 #define PANEL_X      10
 #define PANEL_Y      18
@@ -1672,6 +1710,58 @@ void PanelRow(int index, string text, color clr)
    ObjectSetString(0, name, OBJPROP_TEXT, text);
   }
 
+//| Livello virtuale della posizione aperta. Restituisce false se non c'e'
+//| nulla da mostrare.
+bool CurrentVirtualStop(double &level, double &plPoints)
+  {
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      if(!OrderSelect(i, SELECT_BY_POS, MODE_TRADES))
+         continue;
+      if(OrderMagicNumber() != Magic || OrderSymbol() != Symbol())
+         continue;
+      int type = OrderType();
+      if(type != OP_BUY && type != OP_SELL)
+         continue;
+
+      double tp = 0.0, sl = 0.0, ts = 0.0;
+      EnsureLevels(OrderTicket(), type, OrderOpenPrice(), tp, sl, ts);
+      level    = sl;
+      plPoints = (type == OP_BUY ? (Bid - OrderOpenPrice())
+                                 : (OrderOpenPrice() - Ask)) / g_point;
+      return(sl > 0.0);
+     }
+   return(false);
+  }
+
+//| Traccia lo stop virtuale come oggetto grafico. E' solo un disegno locale:
+//| al broker non arriva nulla, ma senza di esso non c'e' modo di vedere dove
+//| sta il livello ne' se si sta muovendo.
+void DrawVirtualStop()
+  {
+   string name = PANEL_PREFIX + "vstop";
+   double level = 0.0, pl = 0.0;
+
+   if(!ShowVirtualLevels || IsOptimization() || !CurrentVirtualStop(level, pl))
+     {
+      if(ObjectFind(0, name) >= 0)
+         ObjectDelete(0, name);
+      return;
+     }
+
+   if(ObjectFind(0, name) < 0)
+     {
+      ObjectCreate(0, name, OBJ_HLINE, 0, 0, 0);
+      ObjectSetInteger(0, name, OBJPROP_STYLE,      STYLE_DOT);
+      ObjectSetInteger(0, name, OBJPROP_WIDTH,      1);
+      ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, name, OBJPROP_HIDDEN,     true);
+      ObjectSetInteger(0, name, OBJPROP_BACK,       true);
+     }
+   ObjectSetInteger(0, name, OBJPROP_COLOR, VirtualStopColor);
+   ObjectSetDouble(0, name, OBJPROP_PRICE1, level);
+  }
+
 string OnOff(bool v)
   {
    return(v ? "ON" : "OFF");
@@ -1721,7 +1811,7 @@ void UpdatePanel(bool timeOk, string timeReason, bool newsBlocked, string newsLa
    color okColor  = clrLimeGreen;
    color badColor = clrTomato;
 
-   PanelRow(0,  "SCALP EA v1.30", PanelAccentColor);
+   PanelRow(0,  "SCALP EA v1.40", PanelAccentColor);
    PanelRow(1,  "----------------------------------", clrDimGray);
    PanelRow(2,  StringFormat("%-11s %s %s", "Simbolo", Symbol(),
                              TimeframeToString((ENUM_TIMEFRAMES)Period())), PanelTextColor);
@@ -1738,21 +1828,29 @@ void UpdatePanel(bool timeOk, string timeReason, bool newsBlocked, string newsLa
 
    double upPts   = (g_refLow  > 0.0 ? (Bid - g_refLow)  / g_point : 0.0);
    double downPts = (g_refHigh > 0.0 ? (g_refHigh - Bid) / g_point : 0.0);
-   PanelRow(7,  StringFormat("%-11s +%.0f / -%.0f pt  su %d", "Swing",
+   double vstop = 0.0, vpl = 0.0;
+   bool   hasPos = CurrentVirtualStop(vstop, vpl);
+   PanelRow(7,  hasPos
+                ? StringFormat("%-11s %s  P/L %+.0f/%.0f pt", "Stop virt",
+                               DoubleToString(vstop, g_digits), vpl, TrailingStartThreshold())
+                : StringFormat("%-11s %s", "Stop virt", "nessuna posizione"),
+                (hasPos && vpl >= TrailingStartThreshold() ? clrLimeGreen : PanelTextColor));
+
+   PanelRow(8,  StringFormat("%-11s +%.0f / -%.0f pt  su %d", "Swing",
                              upPts, downPts, EntryDistance),
                 (SignalMode == SIGNAL_BAR ? clrDimGray : PanelTextColor));
 
-   PanelRow(8,  "----------------------------------", clrDimGray);
-   PanelRow(9,  StringFormat("%-11s %s   SAR %s", "Direzione", DirectionName(), OnOff(SAR)), PanelTextColor);
-   PanelRow(10, StringFormat("%-11s %d/%d   buy %d  sell %d   %.2f lot", "Ordini",
+   PanelRow(9,  "----------------------------------", clrDimGray);
+   PanelRow(10, StringFormat("%-11s %s   SAR %s", "Direzione", DirectionName(), OnOff(SAR)), PanelTextColor);
+   PanelRow(11, StringFormat("%-11s %d/%d   buy %d  sell %d   %.2f lot", "Ordini",
                              buys + sells, maxOrders, buys, sells, g_lots), PanelTextColor);
-   PanelRow(11, StringFormat("%-11s %.2f", "Flottante", flt), (flt >= 0.0 ? okColor : badColor));
-   PanelRow(12, StringFormat("%-11s %.2f   trade %d", "Giorno", dayPl, g_tradesToday),
+   PanelRow(12, StringFormat("%-11s %.2f", "Flottante", flt), (flt >= 0.0 ? okColor : badColor));
+   PanelRow(13, StringFormat("%-11s %.2f   trade %d", "Giorno", dayPl, g_tradesToday),
                 (dayPl >= 0.0 ? okColor : badColor));
-   PanelRow(13, "----------------------------------", clrDimGray);
-   PanelRow(14, StringFormat("%-11s %s", "Sessione", (timeOk ? "attiva" : timeReason)),
+   PanelRow(14, "----------------------------------", clrDimGray);
+   PanelRow(15, StringFormat("%-11s %s", "Sessione", (timeOk ? "attiva" : timeReason)),
                 (timeOk ? okColor : badColor));
-   PanelRow(15, StringFormat("%-11s %s", "News",
+   PanelRow(16, StringFormat("%-11s %s", "News",
                              (!NewsFilter ? "filtro OFF"
                               : (newsBlocked ? "BLOCCO " + newsLabel
                                  : g_newsStatus + " | " + g_nextNewsLabel))),
@@ -1776,7 +1874,7 @@ void UpdatePanel(bool timeOk, string timeReason, bool newsBlocked, string newsLa
          state      = "operativo | ultimo filtro: " + g_lastBlock;
          stateColor = okColor;
         }
-   PanelRow(16, StringFormat("%-11s %s", "Stato", state), stateColor);
+   PanelRow(17, StringFormat("%-11s %s", "Stato", state), stateColor);
 
    if(!IsTesting())
       ChartRedraw();
@@ -1843,6 +1941,8 @@ void OnTick()
 
    // 6. Fotografia dello stato per il tick successivo
    SnapshotOpenTickets();
+
+   DrawVirtualStop();
 
    UpdatePanel(timeOk, timeReason, newsBlk, newsLabel);
   }

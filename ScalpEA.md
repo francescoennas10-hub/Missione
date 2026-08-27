@@ -1,4 +1,4 @@
-# Scalp EA v1.30 (MQL4 / MetaTrader 4)
+# Scalp EA v1.40 (MQL4 / MetaTrader 4)
 
 Scalper intraday su XAUUSD M5: entra sui **movimenti minimi**, tiene **una posizione alla
 volta**, non manda **nessuno stop al broker** e chiude **solo con il trailing**, che nasce
@@ -95,11 +95,15 @@ Due parametri distinti governano due cose diverse:
 | `TrailingStop` / `TrailingPriceDistance` | **quanto** sta indietro il livello |
 | `TrailingStartPoints` / `TrailingStartPriceDistance` | **da quale profitto** comincia a muoversi |
 
-Per far partire il trailing dopo un profitto preciso basta impostare la soglia, per esempio
-`TrailingStartPriceDistance = 0.50`: fino a +0.50 lo stop resta fermo dove e' nato
-(ingresso meno la distanza del trailing, quindi la posizione **e' comunque protetta**);
-superata la soglia comincia a inseguire il massimo a `TrailingStop` di distanza.
-`TrailingStartPoints` fa lo stesso in punti, e vale solo se la versione in prezzo e' a zero.
+Il preset usa `TrailingPriceDistance = 0.30` e `TrailingStartPriceDistance = 0.50`: fino a
++0.50 lo stop resta fermo dove e' nato (ingresso meno 0.30, quindi la posizione **e'
+comunque protetta**), superata la soglia comincia a inseguire il massimo a 0.30 di distanza,
+bloccando subito +0.20. `TrailingStartPoints` e `ManualTrailingPoints` fanno lo stesso in
+punti, e valgono solo se le rispettive versioni in prezzo sono a zero.
+
+Con `TrailingStop = Manual` (impostazione del preset) **l'ATR non entra in gioco**: il
+valore dichiarato vale esattamente quello, senza pavimenti ne' correzioni sulla volatilita'.
+`MinTrailingPoints` agisce solo in modo `Automatic`.
 
 Lasciando entrambe a zero il comportamento e' quello predefinito: con
 `TrailingFromEntry = true` il livello segue fin dal primo tick; con `TrailingFromEntry =
@@ -128,8 +132,17 @@ la volatilita':
 |---|---|---|---|
 | Take profit | `AutoTP_ATR * ATR` | 0.25 | spento nel preset |
 | Stop loss | `AutoSL_ATR * ATR` | 0.50 | spento nel preset |
-| Trailing | `AutoTS_ATR * ATR`, con pavimento `MinTrailingPoints` | 0.35 / 40 | ~70 punti |
-| Partenza del trailing | `TrailingStartPriceDistance` o `TrailingStartPoints` | 0 | subito (stop gia' ancorato all'ingresso) |
+| Trailing | `AutoTS_ATR * ATR`, con pavimento `MinTrailingPoints` | 0.35 / 40 | ~70 punti (**non usato dal preset**) |
+| Partenza del trailing | `TrailingStartPriceDistance` o `TrailingStartPoints` | 0.50 | +50 punti |
+
+> **La distanza del trailing viene congelata all'apertura** di ogni posizione, insieme a TP
+> e SL, e conservata per quel ticket. Ricalcolarla a ogni tick era un errore: lo stop viene
+> ancorato con la distanza del momento in cui nasce, e se quella corrente si allarga il
+> livello inseguito arretra rispetto all'ancora, lo stop resta fermo e il trailing sembra
+> morto pur essendo attivo. Con `TrailingStop = Automatic` e un ATR in salita l'effetto era
+> concreto: bastava un ATR che passasse da 1.50 a 3.00 dollari perche' servissero 57 punti
+> di profitto invece dei 50 dichiarati. Nel tester, su periodi a volatilita' stabile, non si
+> vedeva.
 
 In `Manual` valgono `ManualTakeProfitPoints`, `ManualStopLossPoints` e
 `ManualTrailingPoints`; `StopLossPriceDistance` e `TrailingPriceDistance`, se maggiori di
@@ -171,11 +184,30 @@ backtest contano solo gli orari di `ManualNewsTimes` (formato
 `YYYY.MM.DD HH:MM;YYYY.MM.DD HH:MM`); e se l'URL non e' fra quelli autorizzati in MT4 il
 journal riporta l'errore 4060 e l'EA continua a operare **senza** filtro.
 
-### 9. Pannello
+### 9. Vedere cosa sta facendo
+
+I livelli sono virtuali: al broker non arrivano, quindi per costruzione non compaiono nella
+finestra Terminale ne' fra le righe di trade di MT4. Senza strumenti dedicati non c'e' modo
+di sapere se il trailing si e' mosso. Due cose lo rendono osservabile:
+
+- **`ShowVirtualLevels = true`** disegna lo stop virtuale sul grafico come linea
+  tratteggiata (`VirtualStopColor`). E' un **oggetto grafico locale**, non un ordine: il
+  broker continua a non vedere nulla, ma tu vedi dove sta il livello e se avanza.
+- **Il journal** riceve una riga al primo scatto del trailing su ogni posizione, con prezzo,
+  P/L raggiunto, soglia e distanza applicata:
+  `ScalpEA: trailing attivato su #12345 a 4579.00 (P/L 50 pt, soglia 50 pt, distanza 30 pt)`.
+
+Se quella riga non compare mentre il P/L supera la soglia, il problema e' nei parametri
+caricati, non nella logica: confrontare la riga `Trailing` del pannello con quanto ci si
+aspetta.
+
+### 10. Pannello
+
 Con `showPanel = true` compare un riquadro con simbolo e timeframe, spread e stop level,
 ATR, TP/SL/trailing correnti (`off` quando un livello non esiste, `= trailing` quando a
-proteggere e' il trailing stesso) con la **soglia di partenza** accanto, **distanza attuale
-dal riferimento di swing** confrontata
+proteggere e' il trailing stesso) con la **soglia di partenza** accanto, **stop virtuale
+della posizione aperta** con il P/L corrente confrontato alla soglia (la riga diventa verde
+quando la soglia e' superata), **distanza attuale dal riferimento di swing** confrontata
 con `EntryDistance`, direzione e stato del SAR, ordini aperti e lotto, flottante, risultato
 della giornata, stato della sessione, stato del filtro notizie e ultimo filtro che ha
 bloccato un ingresso. Si aggiorna una volta al secondo.
@@ -192,7 +224,7 @@ bloccato un ingresso. Si aggiorna una volta al secondo.
 | `EntryDistance` | 30 | movimento minimo che fa scattare l'ingresso |
 | `TakeProfit` | Disabled | nessun obiettivo di prezzo |
 | `StopLoss` | Disabled | nessuno stop separato: protegge il trailing |
-| `TrailingStop` | Automatic | 0.35 x ATR, pavimento 40 punti |
+| `TrailingStop` | Manual | 0.30 di prezzo, valore dichiarato, senza ATR |
 | `maxOrders` | 1 | una posizione alla volta |
 | `DailyProfit` / `MaxDD` / `Total SL` | 0 | protezioni di paniere disattivate |
 | `Trading24h` | true | nessun vincolo orario |
@@ -203,7 +235,8 @@ bloccato un ingresso. Si aggiorna una volta al secondo.
 | `showPanel` | true | pannello visibile |
 | `SignalMode` | SIGNAL_SWING | ingresso sui movimenti minimi |
 | `TrailingFromEntry` | true | lo stop esiste gia' al prezzo di ingresso |
-| `TrailingStartPoints` / `...PriceDistance` | 0 | il trailing insegue da subito |
+| `TrailingStartPriceDistance` | 0.50 | il trailing parte a +0.50 di profitto |
+| `ShowVirtualLevels` | true | lo stop virtuale viene disegnato sul grafico |
 | `UseEmergencyBrokerStop` | false | nessuno stop inviato al broker |
 
 I primi 40 input riproducono nome, ordine ed etichetta del set allegato; il blocco
@@ -246,4 +279,4 @@ I primi 40 input riproducono nome, ordine ed etichetta del set allegato; il bloc
 | Livelli virtuali | `EnsureLevels`, `StoreLevels`, `ForgetLevels`, `ManageOpenPositions` |
 | SAR | `SnapshotOpenTickets`, `DetectBrokerClosures`, `QueueSar`, `ProcessSarQueue` |
 | Paniere | `CheckBasketLimits`, `DayProfit`, `RealizedToday`, `FloatingPoints` |
-| Interfaccia | `BuildPanel`, `PanelRow`, `UpdatePanel` |
+| Interfaccia | `BuildPanel`, `PanelRow`, `UpdatePanel`, `DrawVirtualStop`, `CurrentVirtualStop` |
