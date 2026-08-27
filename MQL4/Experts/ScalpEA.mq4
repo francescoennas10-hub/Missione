@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //|                                                     ScalpEA.mq4   |
 //|      Scalper a posizione singola, uscita solo a trailing, per MT4 |
-//|                                v1.20                              |
+//|                                v1.30                              |
 //|                                                                   |
 //|  COSA FA                                                          |
 //|   Scalper intraday ricostruito sul comportamento osservato in due |
@@ -51,7 +51,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Scalp EA"
 #property link      ""
-#property version   "1.20"
+#property version   "1.30"
 #property strict
 
 //+------------------------------------------------------------------+
@@ -144,7 +144,9 @@ input double  StopLossPriceDistance  = 0.90;// SL in prezzo (ha la precedenza se
 input int     ManualTrailingPoints   = 60;  // Trailing in punti se TrailingStop = Manual
 input double  TrailingPriceDistance = 0.0; // Trailing in prezzo (ha la precedenza se > 0)
 input int     MinTrailingPoints     = 40;  // Trailing minimo: sotto non scende mai
-input bool    TrailingFromEntry     = true;// Il trailing parte dal prezzo di ingresso
+input bool    TrailingFromEntry     = true;// Lo stop esiste gia' dal prezzo di ingresso
+input int     TrailingStartPoints   = 0;   // Profitto prima che il trailing si muova (0 = automatico)
+input double  TrailingStartPriceDistance = 0.0; // Come sopra ma in prezzo (precedenza se > 0)
 input int     TrailingStepPoints     = 5;   // Passo minimo di avanzamento del trailing
 
 input string  s_safety            = "===== SICUREZZE =====";
@@ -281,7 +283,7 @@ int OnInit()
    if(showPanel && !IsOptimization())
       BuildPanel();
 
-   Print("ScalpEA v1.20 avviato su ", Symbol(), " ", TimeframeToString((ENUM_TIMEFRAMES)Period()),
+   Print("ScalpEA v1.30 avviato su ", Symbol(), " ", TimeframeToString((ENUM_TIMEFRAMES)Period()),
          " | Magic ", Magic, " | livelli ", (UseVirtualLevels ? "virtuali" : "sul broker"));
 
    return(INIT_SUCCEEDED);
@@ -441,6 +443,23 @@ double StopLossPoints()
    if(sl < 1.0)
       sl = 0.0;
    return(sl);
+  }
+
+//| Profitto, in punti, che l'operazione deve accumulare prima che il
+//| trailing cominci a muoversi. E' una grandezza distinta dalla distanza
+//| del trailing: la prima dice QUANDO parte, la seconda QUANTO sta indietro.
+//| Senza indicazioni esplicite si comporta come prima: con lo stop gia'
+//| ancorato all'ingresso segue da subito, altrimenti aspetta un guadagno
+//| pari almeno alla propria distanza piu' lo spread.
+double TrailingStartThreshold()
+  {
+   if(TrailingStartPriceDistance > 0.0 && g_point > 0.0)
+      return(TrailingStartPriceDistance / g_point);
+   if(TrailingStartPoints > 0)
+      return((double)TrailingStartPoints);
+   if(TrailingFromEntry)
+      return(0.0);
+   return(TrailingPoints() + g_spreadPoints);
   }
 
 //| Distanza del trailing stop in punti.
@@ -1331,6 +1350,7 @@ bool TryOpenPosition(int type, string why, bool isSar)
 void ManageOpenPositions()
   {
    double tsPts   = TrailingPoints();
+   double startPts = TrailingStartThreshold();
    double stepPts = (double)TrailingStepPoints;
    if(stepPts < 1.0)
       stepPts = 1.0;
@@ -1372,15 +1392,15 @@ void ManageOpenPositions()
             ClosePositionByTicket(ticket, why, true);
             continue;
            }
-         // 3. Trailing sul livello virtuale. Con TrailingFromEntry il livello
-         //    esiste gia' dall'apertura e insegue subito; altrimenti entra in
-         //    funzione solo quando il guadagno supera la sua stessa distanza.
+         // 3. Trailing sul livello virtuale. TrailingFromEntry decide se lo
+         //    stop esiste gia' all'apertura; TrailingStartThreshold da quale
+         //    profitto comincia a muoversi. Sono due cose diverse: la prima
+         //    protegge, la seconda insegue.
          if(tsPts > 0.0)
            {
             if(type == OP_BUY)
               {
-               bool   ready = TrailingFromEntry ||
-                              ((Bid - open) / g_point >= tsPts + g_spreadPoints);
+               bool   ready = ((Bid - open) / g_point >= startPts);
                double newSl = NormalizeDouble(Bid - tsPts * g_point, g_digits);
                if(ready && (sl == 0.0 || newSl > sl + stepPts * g_point))
                  {
@@ -1390,8 +1410,7 @@ void ManageOpenPositions()
               }
             else
               {
-               bool   ready = TrailingFromEntry ||
-                              ((open - Ask) / g_point >= tsPts + g_spreadPoints);
+               bool   ready = ((open - Ask) / g_point >= startPts);
                double newSl = NormalizeDouble(Ask + tsPts * g_point, g_digits);
                if(ready && (sl == 0.0 || newSl < sl - stepPts * g_point))
                  {
@@ -1702,7 +1721,7 @@ void UpdatePanel(bool timeOk, string timeReason, bool newsBlocked, string newsLa
    color okColor  = clrLimeGreen;
    color badColor = clrTomato;
 
-   PanelRow(0,  "SCALP EA v1.20", PanelAccentColor);
+   PanelRow(0,  "SCALP EA v1.30", PanelAccentColor);
    PanelRow(1,  "----------------------------------", clrDimGray);
    PanelRow(2,  StringFormat("%-11s %s %s", "Simbolo", Symbol(),
                              TimeframeToString((ENUM_TIMEFRAMES)Period())), PanelTextColor);
@@ -1712,9 +1731,10 @@ void UpdatePanel(bool timeOk, string timeReason, bool newsBlocked, string newsLa
    PanelRow(4,  StringFormat("%-11s %.0f pt", "ATR(" + IntegerToString(ATR_Period) + ")", atrPts), PanelTextColor);
    PanelRow(5,  StringFormat("%-11s %s / %s", "TP / SL",
                              LevelText(TakeProfitPoints()), StopText()), PanelTextColor);
-   PanelRow(6,  StringFormat("%-11s %s   %s", "Trailing",
+   PanelRow(6,  StringFormat("%-11s %s  %s  parte +%.0f", "Trailing",
                              LevelText(TrailingPoints()),
-                             (TrailingFromEntry ? "dall'ingresso" : "sul profitto")), PanelTextColor);
+                             (TrailingFromEntry ? "entry" : "profit"),
+                             TrailingStartThreshold()), PanelTextColor);
 
    double upPts   = (g_refLow  > 0.0 ? (Bid - g_refLow)  / g_point : 0.0);
    double downPts = (g_refHigh > 0.0 ? (g_refHigh - Bid) / g_point : 0.0);

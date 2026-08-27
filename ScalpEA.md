@@ -1,4 +1,4 @@
-# Scalp EA v1.20 (MQL4 / MetaTrader 4)
+# Scalp EA v1.30 (MQL4 / MetaTrader 4)
 
 Scalper intraday su XAUUSD M5: entra sui **movimenti minimi**, tiene **una posizione alla
 volta**, non manda **nessuno stop al broker** e chiude **solo con il trailing**, che nasce
@@ -68,6 +68,7 @@ Non esistono ne' take profit ne' stop loss separati. **Il trailing e' insieme la
 protezione e l'unica uscita**:
 
 - all'apertura il livello nasce a `TrailingStop` di distanza dal prezzo di ingresso;
+- comincia a muoversi quando il profitto raggiunge la **soglia di partenza** (sotto);
 - da quel momento si muove **solo a favore**, seguendo il massimo (acquisto) o il minimo
   (vendita) raggiunto, con passo minimo `TrailingStepPoints`;
 - la posizione si chiude quando il prezzo lo tocca, e mai per altri motivi.
@@ -85,9 +86,26 @@ Allargarla lascia respirare il movimento e riduce le chiusure premature, ma alza
 per operazione; stringerla fa l'opposto. `MinTrailingPoints` (40 di default) impedisce che
 scenda sotto il rumore del timeframe e chiuda al primo respiro del prezzo.
 
-Con `TrailingFromEntry = false` si torna al trailing classico, che entra in funzione solo
-quando il guadagno supera la propria distanza — ma in quel caso, senza stop loss, la
-posizione resta scoperta fino a quel momento.
+#### Quando parte il trailing
+
+Due parametri distinti governano due cose diverse:
+
+| Parametro | Risponde a |
+|---|---|
+| `TrailingStop` / `TrailingPriceDistance` | **quanto** sta indietro il livello |
+| `TrailingStartPoints` / `TrailingStartPriceDistance` | **da quale profitto** comincia a muoversi |
+
+Per far partire il trailing dopo un profitto preciso basta impostare la soglia, per esempio
+`TrailingStartPriceDistance = 0.50`: fino a +0.50 lo stop resta fermo dove e' nato
+(ingresso meno la distanza del trailing, quindi la posizione **e' comunque protetta**);
+superata la soglia comincia a inseguire il massimo a `TrailingStop` di distanza.
+`TrailingStartPoints` fa lo stesso in punti, e vale solo se la versione in prezzo e' a zero.
+
+Lasciando entrambe a zero il comportamento e' quello predefinito: con
+`TrailingFromEntry = true` il livello segue fin dal primo tick; con `TrailingFromEntry =
+false` non esiste alcuno stop finche' il guadagno non supera la distanza del trailing piu'
+lo spread — e in quel caso, senza stop loss, **la posizione resta scoperta fino a quel
+momento**.
 
 ### 4. SAR (Stop And Reverse)
 Quando una posizione si chiude **in perdita**, l'EA apre subito la posizione opposta. Vale
@@ -111,6 +129,7 @@ la volatilita':
 | Take profit | `AutoTP_ATR * ATR` | 0.25 | spento nel preset |
 | Stop loss | `AutoSL_ATR * ATR` | 0.50 | spento nel preset |
 | Trailing | `AutoTS_ATR * ATR`, con pavimento `MinTrailingPoints` | 0.35 / 40 | ~70 punti |
+| Partenza del trailing | `TrailingStartPriceDistance` o `TrailingStartPoints` | 0 | subito (stop gia' ancorato all'ingresso) |
 
 In `Manual` valgono `ManualTakeProfitPoints`, `ManualStopLossPoints` e
 `ManualTrailingPoints`; `StopLossPriceDistance` e `TrailingPriceDistance`, se maggiori di
@@ -155,7 +174,8 @@ journal riporta l'errore 4060 e l'EA continua a operare **senza** filtro.
 ### 9. Pannello
 Con `showPanel = true` compare un riquadro con simbolo e timeframe, spread e stop level,
 ATR, TP/SL/trailing correnti (`off` quando un livello non esiste, `= trailing` quando a
-proteggere e' il trailing stesso), **distanza attuale dal riferimento di swing** confrontata
+proteggere e' il trailing stesso) con la **soglia di partenza** accanto, **distanza attuale
+dal riferimento di swing** confrontata
 con `EntryDistance`, direzione e stato del SAR, ordini aperti e lotto, flottante, risultato
 della giornata, stato della sessione, stato del filtro notizie e ultimo filtro che ha
 bloccato un ingresso. Si aggiorna una volta al secondo.
@@ -182,7 +202,8 @@ bloccato un ingresso. Si aggiorna una volta al secondo.
 | `Report for GBP` / `JPY` | false | ignorate |
 | `showPanel` | true | pannello visibile |
 | `SignalMode` | SIGNAL_SWING | ingresso sui movimenti minimi |
-| `TrailingFromEntry` | true | il trailing nasce al prezzo di ingresso |
+| `TrailingFromEntry` | true | lo stop esiste gia' al prezzo di ingresso |
+| `TrailingStartPoints` / `...PriceDistance` | 0 | il trailing insegue da subito |
 | `UseEmergencyBrokerStop` | false | nessuno stop inviato al broker |
 
 I primi 40 input riproducono nome, ordine ed etichetta del set allegato; il blocco
@@ -195,9 +216,11 @@ I primi 40 input riproducono nome, ordine ed etichetta del set allegato; il bloc
   posizione resta **scoperta** sul server. E' il prezzo di avere il grafico pulito, ed e'
   una scelta consapevole: `UseEmergencyBrokerStop = true` rimette una rete di sicurezza
   larga (`EmergencyStopFactor` volte il trailing), al costo di una linea visibile.
-- **Il trailing e' l'unico parametro che conta davvero.** Regola insieme quanto si rischia
-  e quanto presto si esce. Se le operazioni si chiudono troppo presto, la leva e'
-  `AutoTS_ATR` (o `TrailingPriceDistance` per fissarlo in prezzo), non altro.
+- **Il trailing e' il parametro che conta di piu'.** La sua distanza regola insieme quanto
+  si rischia e quanto presto si esce: se le operazioni si chiudono troppo presto la leva e'
+  `AutoTS_ATR`, o `TrailingPriceDistance` per fissarla in prezzo. La soglia di partenza e'
+  un'altra leva ancora: alzarla lascia correre l'inizio del movimento senza toccare il
+  rischio massimo, che resta la distanza del trailing.
 - **Frequenza e costi.** A 7-8 operazioni per barra M5 lo spread e' il primo avversario:
   con 25 punti di spread e un trailing di 70, ogni giro parte con oltre un terzo del
   risultato gia' speso. `MaxSpreadPoints` e' a zero nel preset, com'e' nelle registrazioni:
@@ -217,7 +240,7 @@ I primi 40 input riproducono nome, ordine ed etichetta del set allegato; il bloc
 | Sezione | Funzioni principali |
 |---|---|
 | Segnale | `EntrySignal`, `SwingSignal`, `BarSignal`, `ResetSwingRefs`, `UpdateSwingRefs` |
-| Livelli | `AtrPoints`, `TakeProfitPoints`, `StopLossPoints`, `TrailingPoints`, `MinBrokerDistance` |
+| Livelli | `AtrPoints`, `TakeProfitPoints`, `StopLossPoints`, `TrailingPoints`, `TrailingStartThreshold`, `MinBrokerDistance` |
 | Filtri | `TimeAllowed`, `IsNonFarmFriday`, `IsHolidayPeriod`, `NewsBlocked`, `LoadNewsCalendar` |
 | Ordini | `TryOpenPosition`, `ClosePositionByTicket`, `CloseAllPositions`, `SpacingOk` |
 | Livelli virtuali | `EnsureLevels`, `StoreLevels`, `ForgetLevels`, `ManageOpenPositions` |
